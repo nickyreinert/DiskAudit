@@ -87,7 +87,7 @@ struct AboutSheetView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Institut fur digitale Herausforderungen")
+                Text("Institut fuer digitale Herausforderungen")
                     .font(.headline)
                 Link("institut-fdh.de", destination: URL(string: "https://institut-fdh.de")!)
                 Link("Buy me a coffee", destination: URL(string: "https://buymeacoffee.com/nickyreinert")!)
