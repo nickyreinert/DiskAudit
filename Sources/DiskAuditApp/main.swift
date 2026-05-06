@@ -166,6 +166,58 @@ struct CleanupJournalEntry: Identifiable {
     }
 }
 
+enum WatchedItemKind: String, Codable {
+    case file
+    case folder
+    case fileExtension  // synthetic tile in File Types view (keyed by extension string)
+    case folderName     // synthetic tile in Folder Types view (keyed by folder name)
+}
+
+struct WatchedItem: Identifiable, Codable {
+    let id: UUID
+    let kind: WatchedItemKind
+    /// path for file/folder; bare extension (without dot) for fileExtension; last-path-component for folderName
+    let identifier: String
+    let displayName: String
+    let sizeAtWatch: Int64
+    var exists: Bool = true
+    var lastChecked: Date?
+
+    init(id: UUID = UUID(), kind: WatchedItemKind, identifier: String, displayName: String, sizeAtWatch: Int64) {
+        self.id = id
+        self.kind = kind
+        self.identifier = identifier
+        self.displayName = displayName
+        self.sizeAtWatch = sizeAtWatch
+    }
+}
+
+struct ScanHistoryEntry: Identifiable, Codable {
+    let id: UUID
+    let timestamp: Date
+    let fileCount: Int
+    let folderCount: Int
+    let durationSeconds: Double
+    let totalBytes: Int64
+
+    init(id: UUID = UUID(), timestamp: Date, fileCount: Int, folderCount: Int, durationSeconds: Double, totalBytes: Int64) {
+        self.id = id
+        self.timestamp = timestamp
+        self.fileCount = fileCount
+        self.folderCount = folderCount
+        self.durationSeconds = durationSeconds
+        self.totalBytes = totalBytes
+    }
+
+    var readableSize: String {
+        ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+    }
+    var readableDuration: String {
+        if durationSeconds < 60 { return String(format: "%.0fs", durationSeconds) }
+        return String(format: "%.1fm", durationSeconds / 60)
+    }
+}
+
 @MainActor
 final class ScanViewModel: ObservableObject {
     @Published var minSizeMB: Int = 200
@@ -196,8 +248,12 @@ final class ScanViewModel: ObservableObject {
     @Published var currentDrillDownExtension: String? = nil
     @Published var currentDrillDownFolderName: String? = nil
     @Published var currentTreeDrillPath: String? = nil
+    @Published var watchList: [WatchedItem] = []
+    @Published var watchListFilterEnabled: Bool = false
+    @Published var scanHistory: [ScanHistoryEntry] = []
 
     private var scanTask: Task<Void, Never>?
+    private var scanStartTime: Date?
     private var groupedByExtensionCacheKey: String = ""
     private var groupedByExtensionCacheItems: [AuditItem] = []
     private var groupedByExtensionCacheCounts: [String: Int] = [:]
@@ -215,6 +271,8 @@ final class ScanViewModel: ObservableObject {
         scanLocations = Self.defaultLocations()
         loadJournal()
         loadScanResults()
+        loadWatchList()
+        loadScanHistory()
     }
 
     func clearScanResults() {
@@ -253,6 +311,7 @@ final class ScanViewModel: ObservableObject {
         currentDrillDownExtension = nil
         currentDrillDownFolderName = nil
         currentTreeDrillPath = nil
+        scanStartTime = Date()
 
         scanTask = Task(priority: .userInitiated) {
             let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
@@ -364,6 +423,19 @@ final class ScanViewModel: ObservableObject {
                 self.currentScanningPath = ""
                 self.statusMessage = "Scan finished. Found \(self.files.count) file candidates and \(self.folders.count) folder candidates."
                 self.saveScanResults()
+                let duration = self.scanStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                let totalBytes = (self.files + self.folders).reduce(Int64(0)) { $0 + $1.sizeBytes }
+                let entry = ScanHistoryEntry(
+                    timestamp: Date(),
+                    fileCount: self.files.count,
+                    folderCount: self.folders.count,
+                    durationSeconds: duration,
+                    totalBytes: totalBytes
+                )
+                self.scanHistory.insert(entry, at: 0)
+                if self.scanHistory.count > 50 { self.scanHistory = Array(self.scanHistory.prefix(50)) }
+                self.saveScanHistory()
+                self.scanStartTime = nil
             }
         }
     }
