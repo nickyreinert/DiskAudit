@@ -566,7 +566,8 @@ final class ScanViewModel: ObservableObject {
             let riskPass = selectedRisks.contains(item.risk)
             let categoryPass = selectedCategories.contains(item.category)
             let scopePass = matchesViewCategoryFilter(item)
-            return riskPass && categoryPass && scopePass
+            let watchPass = !watchListFilterEnabled || isWatched(item)
+            return riskPass && categoryPass && scopePass && watchPass
         }
     }
 
@@ -1302,6 +1303,124 @@ final class ScanViewModel: ObservableObject {
         guard let fileURL = scanResultsFileURL() else { return }
         try? FileManager.default.removeItem(at: fileURL)
     }
+
+    // MARK: - Watch List
+
+    func watch(_ item: AuditItem) {
+        let kind: WatchedItemKind = item.kind == .folder ? .folder : .file
+        let identifier = item.url.path
+        guard !watchList.contains(where: { $0.kind == kind && $0.identifier == identifier }) else { return }
+        watchList.append(WatchedItem(kind: kind, identifier: identifier, displayName: item.displayName, sizeAtWatch: item.sizeBytes))
+        saveWatchList()
+    }
+
+    func watchExtension(_ ext: String, size: Int64) {
+        guard !watchList.contains(where: { $0.kind == .fileExtension && $0.identifier == ext }) else { return }
+        watchList.append(WatchedItem(kind: .fileExtension, identifier: ext, displayName: ".\(ext)", sizeAtWatch: size))
+        saveWatchList()
+    }
+
+    func watchFolderName(_ name: String, size: Int64) {
+        guard !watchList.contains(where: { $0.kind == .folderName && $0.identifier == name }) else { return }
+        watchList.append(WatchedItem(kind: .folderName, identifier: name, displayName: name, sizeAtWatch: size))
+        saveWatchList()
+    }
+
+    func unwatch(_ item: WatchedItem) {
+        watchList.removeAll { $0.id == item.id }
+        saveWatchList()
+    }
+
+    func isWatched(_ item: AuditItem) -> Bool {
+        let kind: WatchedItemKind = item.kind == .folder ? .folder : .file
+        return watchList.contains { $0.kind == kind && $0.identifier == item.url.path }
+    }
+
+    func isWatchedByPath(_ path: String) -> Bool {
+        watchList.contains { ($0.kind == .file || $0.kind == .folder) && $0.identifier == path }
+    }
+
+    func watchTreeNode(_ node: PathTreeNode) {
+        let isFolder = !node.children.isEmpty
+        let kind: WatchedItemKind = isFolder ? .folder : .file
+        let identifier = node.fullPath
+        guard !watchList.contains(where: { $0.kind == kind && $0.identifier == identifier }) else { return }
+        watchList.append(WatchedItem(kind: kind, identifier: identifier, displayName: node.name.isEmpty ? "/" : node.name, sizeAtWatch: node.totalSize))
+        saveWatchList()
+    }
+
+    func isTreeNodeWatched(_ node: PathTreeNode) -> Bool {
+        watchList.contains { ($0.kind == .file || $0.kind == .folder) && $0.identifier == node.fullPath }
+    }
+
+    func updateWatchList() {
+        for i in watchList.indices {
+            switch watchList[i].kind {
+            case .file, .folder:
+                watchList[i].exists = FileManager.default.fileExists(atPath: watchList[i].identifier)
+            case .fileExtension:
+                let ext = watchList[i].identifier
+                watchList[i].exists = files.contains { URL(fileURLWithPath: $0.url.path).pathExtension.lowercased() == ext.lowercased() }
+            case .folderName:
+                let name = watchList[i].identifier
+                watchList[i].exists = folders.contains { $0.url.lastPathComponent == name }
+            }
+            watchList[i].lastChecked = Date()
+        }
+        saveWatchList()
+        statusMessage = "Watchlist updated: \(watchList.filter { $0.exists }.count) of \(watchList.count) items still present."
+    }
+
+    private func watchListFileURL() -> URL? {
+        guard let dir = appSupportDir() else { return nil }
+        return dir.appendingPathComponent("watchlist.json", isDirectory: false)
+    }
+
+    private func saveWatchList() {
+        guard let fileURL = watchListFileURL() else { return }
+        if let data = try? JSONEncoder().encode(watchList) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    private func loadWatchList() {
+        guard let fileURL = watchListFileURL(),
+              FileManager.default.fileExists(atPath: fileURL.path),
+              let data = try? Data(contentsOf: fileURL),
+              let loaded = try? JSONDecoder().decode([WatchedItem].self, from: data) else { return }
+        watchList = loaded
+    }
+
+    // MARK: - Scan History
+
+    private func scanHistoryFileURL() -> URL? {
+        guard let dir = appSupportDir() else { return nil }
+        return dir.appendingPathComponent("scan_history.json", isDirectory: false)
+    }
+
+    private func saveScanHistory() {
+        guard let fileURL = scanHistoryFileURL() else { return }
+        if let data = try? JSONEncoder().encode(scanHistory) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    private func loadScanHistory() {
+        guard let fileURL = scanHistoryFileURL(),
+              FileManager.default.fileExists(atPath: fileURL.path),
+              let data = try? Data(contentsOf: fileURL),
+              let loaded = try? JSONDecoder().decode([ScanHistoryEntry].self, from: data) else { return }
+        scanHistory = loaded
+    }
+
+    private func appSupportDir() -> URL? {
+        guard let appSupport = try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        ) else { return nil }
+        let dir = appSupport.appendingPathComponent("DiskAuditNative", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
 }
 
 class PathTreeNode: Identifiable {
@@ -1372,6 +1491,8 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showDeleteQueue = false
     @State private var showJournal = false
+    @State private var showHistory = false
+    @State private var showWatchList = false
 
     var body: some View {
         VStack(spacing: 14) {
@@ -1397,6 +1518,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showJournal) {
             JournalSheetView(model: model) { showJournal = false }
+        }
+        .sheet(isPresented: $showHistory) {
+            ScanHistorySheetView(model: model) { showHistory = false }
+        }
+        .sheet(isPresented: $showWatchList) {
+            WatchListSheetView(model: model) { showWatchList = false }
         }
     }
 
@@ -1429,6 +1556,12 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
 
                 Button("Journal") { showJournal = true }
+                    .buttonStyle(.bordered)
+
+                Button("History (\(model.scanHistory.count))") { showHistory = true }
+                    .buttonStyle(.bordered)
+
+                Button("Watchlist (\(model.watchList.count))") { showWatchList = true }
                     .buttonStyle(.bordered)
 
                 if model.lastScanTimestamp != nil {
@@ -1492,7 +1625,9 @@ struct ContentView: View {
                                 onShowInFinder: { model.openTreeNodeInFinder($0) },
                                 onQueue: { model.queueTreeNode($0) },
                                 onUnqueue: { model.unqueueTreeNode($0) },
-                                isQueued: { model.isTreeNodeQueued($0) }
+                                isQueued: { model.isTreeNodeQueued($0) },
+                                onWatch: { model.watchTreeNode($0) },
+                                isWatched: { model.isTreeNodeWatched($0) }
                             )
                         }
                         .background(Color(red: 0.94, green: 0.94, blue: 0.92))
@@ -1548,6 +1683,16 @@ struct ContentView: View {
                         onHoverChanged: { model.hoveredItem = $0 },
                         onDrillDown: { model.drillDown($0) },
                         isDrillDownable: { model.isDrillDownable($0) },
+                        isWatched: { model.isWatched($0) },
+                        onWatch: { item in
+                            if model.viewMode == .fileTypes && model.currentDrillDownExtension == nil {
+                                model.watchExtension(item.url.lastPathComponent, size: item.sizeBytes)
+                            } else if model.viewMode == .folderTypes && model.currentDrillDownFolderName == nil {
+                                model.watchFolderName(item.url.lastPathComponent, size: item.sizeBytes)
+                            } else {
+                                model.watch(item)
+                            }
+                        },
                         extraSizeLabel: {
                             if model.viewMode == .fileTypes && model.currentDrillDownExtension == nil {
                                 return "\(model.groupedFileCount(for: $0)) files"
@@ -1570,13 +1715,21 @@ struct ContentView: View {
             if let ext = model.currentDrillDownExtension {
                 return Array(model.filesForExtension(ext).prefix(320))
             }
-            return Array(model.groupedByExtension.prefix(320))
+            var items = model.groupedByExtension
+            if model.watchListFilterEnabled {
+                items = items.filter { model.watchList.contains { w in w.kind == .fileExtension && w.identifier == $0.url.lastPathComponent } }
+            }
+            return Array(items.prefix(320))
         }
         if model.viewMode == .folderTypes {
             if let name = model.currentDrillDownFolderName {
                 return Array(model.foldersForName(name).prefix(320))
             }
-            return Array(model.groupedByFolderName.prefix(320))
+            var items = model.groupedByFolderName
+            if model.watchListFilterEnabled {
+                items = items.filter { model.watchList.contains { w in w.kind == .folderName && w.identifier == $0.url.lastPathComponent } }
+            }
+            return Array(items.prefix(320))
         }
         return Array(model.filteredItems.prefix(320))
     }
@@ -1600,6 +1753,19 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.segmented)
+
+            HStack(spacing: 6) {
+                Toggle("Watchlist Filter", isOn: $model.watchListFilterEnabled)
+                    .toggleStyle(.checkbox)
+                    .font(.subheadline.weight(.semibold))
+                    .help("Only show items that are on your watchlist")
+                Spacer()
+                Button("Update") { model.updateWatchList() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(model.watchList.isEmpty)
+                    .help("Check if watched items still exist on disk")
+            }
 
             HStack {
                 Text("Threshold (MB)")
@@ -1724,6 +1890,140 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             Spacer()
         }
+    }
+}
+
+struct ScanHistorySheetView: View {
+    @ObservedObject var model: ScanViewModel
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Scan History")
+                    .font(.title2.bold())
+                Spacer()
+                Button("Close") { onClose() }
+                    .buttonStyle(.bordered)
+            }
+
+            if model.scanHistory.isEmpty {
+                Text("No scans recorded yet.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Table(model.scanHistory) {
+                    TableColumn("Date") { entry in
+                        Text(entry.timestamp.formatted(date: .numeric, time: .shortened))
+                            .font(.caption)
+                    }
+                    TableColumn("Files") { entry in
+                        Text("\(entry.fileCount)")
+                            .font(.caption)
+                            .monospacedDigit()
+                    }
+                    TableColumn("Folders") { entry in
+                        Text("\(entry.folderCount)")
+                            .font(.caption)
+                            .monospacedDigit()
+                    }
+                    TableColumn("Duration") { entry in
+                        Text(entry.readableDuration)
+                            .font(.caption)
+                            .monospacedDigit()
+                    }
+                    TableColumn("Total Size") { entry in
+                        Text(entry.readableSize)
+                            .font(.caption)
+                            .monospacedDigit()
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 680, height: 420)
+    }
+}
+
+struct WatchListSheetView: View {
+    @ObservedObject var model: ScanViewModel
+    let onClose: () -> Void
+
+    private let kindLabels: [WatchedItemKind: String] = [
+        .file: "File",
+        .folder: "Folder",
+        .fileExtension: "File Type",
+        .folderName: "Folder Type"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Watchlist (\(model.watchList.count))")
+                    .font(.title2.bold())
+                Spacer()
+                Button("Update All") { model.updateWatchList() }
+                    .buttonStyle(.bordered)
+                    .disabled(model.watchList.isEmpty)
+                Button("Close") { onClose() }
+                    .buttonStyle(.bordered)
+            }
+
+            Text("Items on this list are checked when you press Update. They can be used to filter any view.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if model.watchList.isEmpty {
+                Text("No items watched yet. Right-click any tile or tree row and choose Watch.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(model.watchList) { item in
+                            HStack(spacing: 10) {
+                                Image(systemName: item.exists ? "eye.fill" : "eye.slash")
+                                    .foregroundStyle(item.exists ? Color.accentColor : Color.red)
+                                    .frame(width: 18)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(item.displayName)
+                                        .font(.caption.weight(.semibold))
+                                        .lineLimit(1)
+                                    HStack(spacing: 6) {
+                                        Text(kindLabels[item.kind] ?? item.kind.rawValue)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Text(ByteCountFormatter.string(fromByteCount: item.sizeAtWatch, countStyle: .file))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        if let checked = item.lastChecked {
+                                            Text("Checked \(checked.formatted(date: .omitted, time: .shortened))")
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                }
+                                Spacer()
+                                Text(item.exists ? "Exists" : "Gone")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(item.exists ? Color.green : Color.red)
+                                Button("Remove") { model.unwatch(item) }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 10)
+                            Divider()
+                        }
+                    }
+                }
+                .frame(maxHeight: .infinity)
+                .background(Color.secondary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .padding(16)
+        .frame(width: 720, height: 500)
     }
 }
 

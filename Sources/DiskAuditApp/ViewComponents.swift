@@ -69,6 +69,8 @@ struct TreemapTile: View {
     let onHoverChanged: (AuditItem?) -> Void
     let onDrillDown: () -> Void
     let isDrillDownable: Bool
+    let isWatched: Bool
+    let onWatch: () -> Void
     let extraSizeLabel: String?
 
     var body: some View {
@@ -149,6 +151,9 @@ struct TreemapTile: View {
                 Label("Drill Down", systemImage: "arrow.down.right")
             }
             .disabled(!isDrillDownable)
+            Button(action: onWatch) {
+                Label(isWatched ? "Unwatch" : "Watch", systemImage: isWatched ? "eye.slash" : "eye")
+            }
             Divider()
             Button("Left Click: Drill Down") {}
                 .disabled(true)
@@ -169,6 +174,8 @@ struct TreemapCanvas: View {
     let onHoverChanged: (AuditItem?) -> Void
     let onDrillDown: (AuditItem) -> Void
     let isDrillDownable: (AuditItem) -> Bool
+    let isWatched: (AuditItem) -> Bool
+    let onWatch: (AuditItem) -> Void
     let extraSizeLabel: (AuditItem) -> String?
 
     var body: some View {
@@ -190,6 +197,8 @@ struct TreemapCanvas: View {
                         onHoverChanged: onHoverChanged,
                         onDrillDown: { onDrillDown(entry.item) },
                         isDrillDownable: isDrillDownable(entry.item),
+                        isWatched: isWatched(entry.item),
+                        onWatch: { onWatch(entry.item) },
                         extraSizeLabel: extraSizeLabel(entry.item)
                     )
                     .position(x: entry.rect.midX, y: entry.rect.midY)
