@@ -2156,7 +2156,6 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showDeleteQueue = false
     @State private var showJournal = false
-    @State private var showAbout = false
 
     var body: some View {
         VStack(spacing: 14) {
@@ -2173,9 +2172,6 @@ struct ContentView: View {
             } else {
                 panelController.hide()
             }
-        }
-        .sheet(isPresented: $showAbout) {
-            AboutPanelController.shared.show()
         }
         .sheet(isPresented: $showSettings) {
             SettingsSheetView(model: model) { showSettings = false }
@@ -2208,7 +2204,7 @@ struct ContentView: View {
             Spacer()
 
             HStack(spacing: 8) {
-                Button("About") { showAbout = true }
+                Button("About") { AboutPanelController.shared.show() }
                     .buttonStyle(.bordered)
                 Button("Settings") { showSettings = true }
                     .buttonStyle(.bordered)
