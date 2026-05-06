@@ -407,6 +407,8 @@ struct PathTreeView: View {
     let onQueue: (PathTreeNode) -> Void
     let onUnqueue: (PathTreeNode) -> Void
     let isQueued: (PathTreeNode) -> Bool
+    let onWatch: (PathTreeNode) -> Void
+    let isWatched: (PathTreeNode) -> Bool
 
     private var rootMaxSize: Int64 {
         max(roots.map(\.totalSize).max() ?? 0, 1)
@@ -424,7 +426,9 @@ struct PathTreeView: View {
                         onShowInFinder: onShowInFinder,
                         onQueue: onQueue,
                         onUnqueue: onUnqueue,
-                        isQueued: isQueued(root)
+                        isQueued: isQueued(root),
+                        onWatch: onWatch,
+                        isWatched: isWatched(root)
                     )
                     Divider()
                 }
