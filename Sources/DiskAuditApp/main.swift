@@ -526,13 +526,15 @@ final class ScanViewModel: ObservableObject {
         groupedByExtensionCacheItems = extensionMap
             .sorted { $0.value.totalSize > $1.value.totalSize }
             .map { ext, data in
-                AuditItem(
+                let cat = self.categoryForExtension(ext)
+                let risk = self.riskLevel(category: cat, garbageReason: nil, isFolder: false)
+                return AuditItem(
                     url: URL(fileURLWithPath: "/\(ext)", isDirectory: false),
                     sizeBytes: data.totalSize,
                     kind: .file,
-                    category: .others,
+                    category: cat,
                     garbageReason: nil,
-                    risk: .review
+                    risk: risk
                 )
             }
         groupedByExtensionCacheKey = key
@@ -582,13 +584,15 @@ final class ScanViewModel: ObservableObject {
         groupedByFolderNameCacheItems = nameMap
             .sorted { $0.value.totalSize > $1.value.totalSize }
             .map { folderName, data in
-                AuditItem(
+                let cat = self.categoryForFolderName(folderName)
+                let risk = self.riskLevel(category: cat, garbageReason: nil, isFolder: true)
+                return AuditItem(
                     url: URL(fileURLWithPath: "/\(folderName)", isDirectory: true),
                     sizeBytes: data.totalSize,
                     kind: .folder,
-                    category: .others,
+                    category: cat,
                     garbageReason: nil,
-                    risk: .review
+                    risk: risk
                 )
             }
         groupedByFolderNameCacheKey = key
@@ -883,6 +887,44 @@ final class ScanViewModel: ObservableObject {
             depth += 1
             current.deleteLastPathComponent()
         }
+    }
+
+    private func categoryForExtension(_ ext: String) -> ScanCategory {
+        switch ext.lowercased() {
+        case "jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff", "bmp", "svg",
+             "ico", "raw", "cr2", "nef", "arw", "dng", "psd", "ai", "eps", "xcf":
+            return .images
+        case "mp4", "mov", "mkv", "avi", "webm", "m4v", "flv", "wmv", "mpg", "mpeg",
+             "3gp", "ts", "vob", "rm", "rmvb", "m2ts":
+            return .videos
+        case "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "dmg", "iso", "pkg",
+             "deb", "rpm", "cab", "lz", "lzma", "zst", "tgz", "tbz2":
+            return .archives
+        case "log", "out":
+            return .logs
+        case "tmp", "temp":
+            return .tempFiles
+        case "part", "partial", "crdownload":
+            return .partials
+        case "pdf", "doc", "docx", "txt", "rtf", "xls", "xlsx", "ppt", "pptx", "md",
+             "pages", "numbers", "key", "odt", "ods", "odp", "csv", "epub", "mobi":
+            return .documents
+        case "app":
+            return .applications
+        default:
+            return .others
+        }
+    }
+
+    private func categoryForFolderName(_ name: String) -> ScanCategory {
+        let lower = name.lowercased()
+        if lower == "node_modules" { return .nodePackages }
+        if lower == ".venv" || lower == "venv" || lower == "env" || lower == ".env"
+            || lower == "virtualenv" || lower == ".virtualenv" { return .virtualEnvs }
+        if lower.contains("cache") || lower.contains("caches") { return .caches }
+        if lower.contains("log") || lower == "logs" { return .logs }
+        if lower.contains("tmp") || lower.contains("temp") { return .tempFiles }
+        return .others
     }
 
     private func classify(path: String, isFolder: Bool) -> ScanCategory {
