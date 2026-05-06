@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Charts
 
 struct ScanLocation: Identifiable, Hashable {
     let id: UUID
@@ -1897,51 +1898,405 @@ struct ScanHistorySheetView: View {
     @ObservedObject var model: ScanViewModel
     let onClose: () -> Void
 
+    @State private var selectedTab: StatsTab = .overview
+
+    enum StatsTab: String, CaseIterable {
+        case overview  = "Overview"
+        case files     = "Files & Folders"
+        case size      = "Data Size"
+        case speed     = "Scan Speed"
+        case cleanup   = "Cleanup"
+    }
+
+    // last 20 scans, oldest first (for charts)
+    private var chronological: [ScanHistoryEntry] {
+        Array(model.scanHistory.prefix(20).reversed())
+    }
+
+    private var totalDeleted: Int64 {
+        model.cleanupJournal.reduce(0) { $0 + $1.freedBytes }
+    }
+    private var totalDeletedCount: Int {
+        model.cleanupJournal.reduce(0) { $0 + $1.deletedCount }
+    }
+    private var latestScan: ScanHistoryEntry? { model.scanHistory.first }
+
+    private let accentA = Color(red: 0.31, green: 0.56, blue: 0.95)
+    private let accentB = Color(red: 0.26, green: 0.80, blue: 0.60)
+    private let accentC = Color(red: 0.95, green: 0.55, blue: 0.28)
+    private let accentD = Color(red: 0.75, green: 0.40, blue: 0.95)
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(spacing: 0) {
+            // ── header ──
             HStack {
-                Text("Scan History")
+                Text("Scan Statistics")
                     .font(.title2.bold())
                 Spacer()
+                Picker("", selection: $selectedTab) {
+                    ForEach(StatsTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 460)
                 Button("Close") { onClose() }
                     .buttonStyle(.bordered)
             }
+            .padding([.horizontal, .top], 16)
+            .padding(.bottom, 10)
+
+            Divider()
 
             if model.scanHistory.isEmpty {
-                Text("No scans recorded yet.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 12) {
+                    Image(systemName: "chart.bar.xaxis")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("No scans recorded yet.")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Table(model.scanHistory) {
-                    TableColumn("Date") { entry in
-                        Text(entry.timestamp.formatted(date: .numeric, time: .shortened))
-                            .font(.caption)
+                ScrollView {
+                    switch selectedTab {
+                    case .overview:  overviewTab
+                    case .files:     filesTab
+                    case .size:      sizeTab
+                    case .speed:     speedTab
+                    case .cleanup:   cleanupTab
                     }
-                    TableColumn("Files") { entry in
-                        Text("\(entry.fileCount)")
-                            .font(.caption)
-                            .monospacedDigit()
-                    }
-                    TableColumn("Folders") { entry in
-                        Text("\(entry.folderCount)")
-                            .font(.caption)
-                            .monospacedDigit()
-                    }
-                    TableColumn("Duration") { entry in
-                        Text(entry.readableDuration)
-                            .font(.caption)
-                            .monospacedDigit()
-                    }
-                    TableColumn("Total Size") { entry in
-                        Text(entry.readableSize)
-                            .font(.caption)
-                            .monospacedDigit()
-                    }
+                }
+                .padding(16)
+            }
+        }
+        .frame(width: 900, height: 620)
+    }
+
+    // ─────────────────────────────────────────
+    // OVERVIEW
+    // ─────────────────────────────────────────
+    @ViewBuilder private var overviewTab: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            // KPI tiles
+            HStack(spacing: 12) {
+                kpiTile(label: "Total Scans", value: "\(model.scanHistory.count)", icon: "arrow.clockwise", color: accentA)
+                kpiTile(label: "Last File Count",
+                        value: latestScan.map { formatCount($0.fileCount) } ?? "—",
+                        icon: "doc.fill", color: accentB)
+                kpiTile(label: "Last Scan Size",
+                        value: latestScan?.readableSize ?? "—",
+                        icon: "internaldrive.fill", color: accentC)
+                kpiTile(label: "Total Freed",
+                        value: ByteCountFormatter.string(fromByteCount: totalDeleted, countStyle: .file),
+                        icon: "trash.fill", color: accentD)
+            }
+
+            // dual-axis mini chart: files + size over time
+            if chronological.count > 1 {
+                chartCard(title: "Files Found & Data Size — over time") {
+                    overviewComboChart
+                }
+            }
+
+            // cleanup bar chart (if any)
+            if !model.cleanupJournal.isEmpty {
+                chartCard(title: "Freed Space per Cleanup") {
+                    cleanupBarsChart(limit: 10)
                 }
             }
         }
-        .padding(16)
-        .frame(width: 680, height: 420)
+    }
+
+    // ─────────────────────────────────────────
+    // FILES & FOLDERS
+    // ─────────────────────────────────────────
+    @ViewBuilder private var filesTab: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            if chronological.count > 1 {
+                chartCard(title: "Files Found per Scan") {
+                    lineChart(data: chronological.map { ($0.timestamp, Double($0.fileCount)) },
+                              color: accentA, label: "Files", yFormat: { formatCount(Int($0)) })
+                }
+                chartCard(title: "Folders Found per Scan") {
+                    lineChart(data: chronological.map { ($0.timestamp, Double($0.folderCount)) },
+                              color: accentB, label: "Folders", yFormat: { formatCount(Int($0)) })
+                }
+                chartCard(title: "Files vs Folders — stacked") {
+                    stackedFileFolderChart
+                }
+            } else {
+                singleScanNote
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // DATA SIZE
+    // ─────────────────────────────────────────
+    @ViewBuilder private var sizeTab: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            if chronological.count > 1 {
+                chartCard(title: "Total Data Size Found per Scan (GB)") {
+                    areaChart(data: chronological.map { ($0.timestamp, Double($0.totalBytes) / 1_073_741_824) },
+                              color: accentC, label: "GB")
+                }
+                chartCard(title: "Data Size Trend") {
+                    barChart(data: chronological.map { ($0.timestamp, Double($0.totalBytes) / 1_073_741_824) },
+                             color: accentC.opacity(0.8), label: "GB")
+                }
+            } else {
+                singleScanNote
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // SCAN SPEED
+    // ─────────────────────────────────────────
+    @ViewBuilder private var speedTab: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            if chronological.count > 1 {
+                chartCard(title: "Scan Duration (seconds)") {
+                    barChart(data: chronological.map { ($0.timestamp, $0.durationSeconds) },
+                             color: accentA, label: "s")
+                }
+                chartCard(title: "Files per Second") {
+                    lineChart(
+                        data: chronological.map { e in
+                            (e.timestamp, e.durationSeconds > 0 ? Double(e.fileCount) / e.durationSeconds : 0)
+                        },
+                        color: accentB, label: "files/s", yFormat: { String(format: "%.0f", $0) }
+                    )
+                }
+            } else {
+                singleScanNote
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // CLEANUP
+    // ─────────────────────────────────────────
+    @ViewBuilder private var cleanupTab: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                kpiTile(label: "Cleanup Runs", value: "\(model.cleanupJournal.count)", icon: "trash.circle.fill", color: accentD)
+                kpiTile(label: "Items Deleted", value: formatCount(totalDeletedCount), icon: "minus.circle.fill", color: accentC)
+                kpiTile(label: "Total Freed", value: ByteCountFormatter.string(fromByteCount: totalDeleted, countStyle: .file), icon: "externaldrive.badge.minus", color: accentB)
+            }
+
+            if model.cleanupJournal.isEmpty {
+                Text("No cleanups performed yet.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                let cleaned = Array(model.cleanupJournal.reversed().prefix(20))
+                chartCard(title: "Freed Space per Cleanup (MB)") {
+                    cleanupBarsChart(limit: 20)
+                }
+                chartCard(title: "Items Deleted per Cleanup") {
+                    let data = cleaned.map { ($0.timestamp, Double($0.deletedCount)) }
+                    barChart(data: data, color: accentD.opacity(0.8), label: "items")
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // CHART PRIMITIVES
+    // ─────────────────────────────────────────
+
+    @ViewBuilder private var overviewComboChart: some View {
+        let maxFiles = chronological.map { Double($0.fileCount) }.max() ?? 1
+        let maxGB = chronological.map { Double($0.totalBytes) / 1_073_741_824 }.max() ?? 1
+
+        Chart {
+            ForEach(chronological) { entry in
+                LineMark(
+                    x: .value("Date", entry.timestamp),
+                    y: .value("Files (norm)", Double(entry.fileCount) / maxFiles)
+                )
+                .foregroundStyle(accentA)
+                .symbol(Circle().strokeBorder(lineWidth: 2))
+                .interpolationMethod(.catmullRom)
+
+                AreaMark(
+                    x: .value("Date", entry.timestamp),
+                    y: .value("Size (norm)", Double(entry.totalBytes) / 1_073_741_824 / maxGB)
+                )
+                .foregroundStyle(accentC.opacity(0.18))
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) {
+                AxisGridLine(); AxisTick()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
+        .chartYAxis { AxisMarks(values: .automatic(desiredCount: 4)) { AxisGridLine(); AxisValueLabel() } }
+        .frame(height: 160)
+    }
+
+    @ViewBuilder private var stackedFileFolderChart: some View {
+        Chart {
+            ForEach(chronological) { entry in
+                BarMark(x: .value("Date", entry.timestamp, unit: .day),
+                        y: .value("Count", entry.fileCount))
+                .foregroundStyle(accentA.opacity(0.85))
+                .annotation(position: .top) {}
+
+                BarMark(x: .value("Date", entry.timestamp, unit: .day),
+                        y: .value("Count", entry.folderCount))
+                .foregroundStyle(accentB.opacity(0.7))
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) {
+                AxisGridLine(); AxisTick()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
+        .frame(height: 160)
+    }
+
+    @ViewBuilder private func lineChart(
+        data: [(Date, Double)], color: Color, label: String, yFormat: ((Double) -> String)? = nil
+    ) -> some View {
+        Chart {
+            ForEach(Array(data.enumerated()), id: \.offset) { _, point in
+                LineMark(x: .value("Date", point.0), y: .value(label, point.1))
+                    .foregroundStyle(color)
+                    .symbol(Circle().strokeBorder(lineWidth: 2))
+                    .interpolationMethod(.catmullRom)
+                AreaMark(x: .value("Date", point.0), y: .value(label, point.1))
+                    .foregroundStyle(color.opacity(0.12))
+                    .interpolationMethod(.catmullRom)
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) {
+                AxisGridLine(); AxisTick()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
+        .chartYAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) {
+                AxisGridLine()
+                AxisValueLabel()
+            }
+        }
+        .frame(height: 150)
+    }
+
+    @ViewBuilder private func areaChart(data: [(Date, Double)], color: Color, label: String) -> some View {
+        Chart {
+            ForEach(Array(data.enumerated()), id: \.offset) { _, point in
+                AreaMark(x: .value("Date", point.0), y: .value(label, point.1))
+                    .foregroundStyle(color.opacity(0.28))
+                    .interpolationMethod(.catmullRom)
+                LineMark(x: .value("Date", point.0), y: .value(label, point.1))
+                    .foregroundStyle(color)
+                    .interpolationMethod(.catmullRom)
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) {
+                AxisGridLine(); AxisTick()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
+        .frame(height: 150)
+    }
+
+    @ViewBuilder private func barChart(data: [(Date, Double)], color: Color, label: String) -> some View {
+        Chart {
+            ForEach(Array(data.enumerated()), id: \.offset) { _, point in
+                BarMark(x: .value("Date", point.0, unit: .day),
+                        y: .value(label, point.1))
+                .foregroundStyle(color)
+                .cornerRadius(3)
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) {
+                AxisGridLine(); AxisTick()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
+        .frame(height: 150)
+    }
+
+    @ViewBuilder private func cleanupBarsChart(limit: Int) -> some View {
+        let data = Array(model.cleanupJournal.reversed().prefix(limit))
+        Chart {
+            ForEach(Array(data.enumerated()), id: \.offset) { _, entry in
+                BarMark(
+                    x: .value("Date", entry.timestamp, unit: .day),
+                    y: .value("MB", Double(entry.freedBytes) / 1_048_576)
+                )
+                .foregroundStyle(accentD.opacity(0.8))
+                .cornerRadius(3)
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) {
+                AxisGridLine(); AxisTick()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
+        .frame(height: 150)
+    }
+
+    // ─────────────────────────────────────────
+    // HELPERS
+    // ─────────────────────────────────────────
+
+    @ViewBuilder private func kpiTile(label: String, value: String, icon: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .foregroundStyle(color)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(value)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .foregroundStyle(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(color.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.18), lineWidth: 1))
+    }
+
+    @ViewBuilder private func chartCard(title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.10), lineWidth: 1))
+    }
+
+    @ViewBuilder private var singleScanNote: some View {
+        Text("Run at least 2 scans to see trend charts.")
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 40)
+    }
+
+    private func formatCount(_ n: Int) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        return f.string(from: NSNumber(value: n)) ?? "\(n)"
     }
 }
 
