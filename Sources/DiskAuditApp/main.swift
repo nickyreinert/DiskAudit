@@ -254,6 +254,9 @@ final class ScanViewModel: ObservableObject {
     @Published var watchList: [WatchedItem] = []
     @Published var watchListFilterEnabled: Bool = false
     @Published var scanHistory: [ScanHistoryEntry] = []
+    /// Aggregated size+count for files that were below the minSizeMB threshold.
+    /// Keyed by file extension (lowercased). Feeds into groupedByExtension.
+    @Published var smallFilesByExtension: [String: (size: Int64, count: Int)] = [:]
 
     private var scanTask: Task<Void, Never>?
     private var scanStartTime: Date?
@@ -309,6 +312,7 @@ final class ScanViewModel: ObservableObject {
         scannedCount = 0
         scannedSizeBytes = 0
         targetSizeBytes = 0
+        smallFilesByExtension = [:]
         statusMessage = ""
         files = []
         folders = []
@@ -350,6 +354,8 @@ final class ScanViewModel: ObservableObject {
             var heavyOrGarbageFiles: [AuditItem] = []
             var folderAccumulator: [String: Int64] = [:]
             var folderGarbageCount: [String: Int] = [:]
+            // Lightweight accumulator for small files — no AuditItem per file
+            var smallByExt: [String: (size: Int64, count: Int)] = [:]
 
             outer: for root in allRoots {
                 guard let enumerator = FileManager.default.enumerator(
@@ -394,8 +400,8 @@ final class ScanViewModel: ObservableObject {
                         if garbageReason != nil {
                             self.accumulateGarbageAncestors(of: fileURL, roots: allRoots, store: &folderGarbageCount)
                         }
-                        // Only create AuditItem for large files or garbage — skip tiny files
                         if size >= minBytes || garbageReason != nil {
+                            // Large or garbage: individual AuditItem
                             let risk = self.riskLevel(category: cat, garbageReason: garbageReason, isFolder: false)
                             heavyOrGarbageFiles.append(
                                 AuditItem(
@@ -407,6 +413,11 @@ final class ScanViewModel: ObservableObject {
                                     risk: risk
                                 )
                             )
+                        } else {
+                            // Small file: accumulate by extension only (no AuditItem)
+                            let ext = fileURL.pathExtension.isEmpty ? "[no extension]" : fileURL.pathExtension.lowercased()
+                            let prev = smallByExt[ext] ?? (size: 0, count: 0)
+                            smallByExt[ext] = (size: prev.size + size, count: prev.count + 1)
                         }
                     }
 
@@ -451,9 +462,11 @@ final class ScanViewModel: ObservableObject {
 
             let finalCount = scannedCount
             let finalBytes = scannedBytes
+            let finalSmallByExt = smallByExt
             await MainActor.run {
                 self.scannedCount = finalCount
                 self.scannedSizeBytes = finalBytes
+                self.smallFilesByExtension = finalSmallByExt
                 self.files = heavyOrGarbageFiles
                 self.folders = folderItems
                 self.treeRoots = PathTreeBuilder.buildTree(from: self.files + self.folders)
@@ -623,13 +636,24 @@ final class ScanViewModel: ObservableObject {
         let source = filteredFilesForCurrentFilters()
         var extensionMap: [String: (totalSize: Int64, count: Int)] = [:]
 
+        // Large/garbage files (individual AuditItems)
         for item in source {
-            let ext = URL(fileURLWithPath: item.url.path).pathExtension.isEmpty ? "[no extension]" : URL(fileURLWithPath: item.url.path).pathExtension
+            let ext = item.url.pathExtension.isEmpty ? "[no extension]" : item.url.pathExtension.lowercased()
             if extensionMap[ext] != nil {
                 extensionMap[ext]!.totalSize += item.sizeBytes
                 extensionMap[ext]!.count += 1
             } else {
                 extensionMap[ext] = (totalSize: item.sizeBytes, count: 1)
+            }
+        }
+
+        // Merge small files (no AuditItem exists for these, but they count!)
+        for (ext, data) in smallFilesByExtension {
+            if extensionMap[ext] != nil {
+                extensionMap[ext]!.totalSize += data.size
+                extensionMap[ext]!.count += data.count
+            } else {
+                extensionMap[ext] = (totalSize: data.size, count: data.count)
             }
         }
 
