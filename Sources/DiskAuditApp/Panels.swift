@@ -10,7 +10,7 @@ final class ProgressPanelController {
             let hosting = NSHostingView(rootView: contentView)
 
             let panel = NSPanel(
-                contentRect: NSRect(x: 200, y: 220, width: 390, height: 146),
+                contentRect: NSRect(x: 200, y: 220, width: 390, height: 110),
                 styleMask: [.titled, .utilityWindow, .nonactivatingPanel],
                 backing: .buffered,
                 defer: false
@@ -38,42 +38,49 @@ struct ProgressPanelView: View {
     @ObservedObject var model: ScanViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Scanning selected locations")
-                .font(.headline)
-            if model.progressValue >= 1 {
-                ProgressView(value: 1.0)
+        VStack(alignment: .leading, spacing: 8) {
+            // Determinate when we have a target size, indeterminate otherwise
+            if model.targetSizeBytes > 0 {
+                ProgressView(value: model.progressValue)
                     .progressViewStyle(.linear)
             } else {
                 ProgressView()
                     .progressViewStyle(.linear)
             }
-            Text(model.progressLabel)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            HStack {
-                Text("Scanned: \(model.scannedCount) files")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline) {
+                if model.targetSizeBytes > 0 {
+                    Text("Scanned \(model.scannedCount) files — \(fmt(model.scannedSizeBytes)) / \(fmt(model.targetSizeBytes))")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                } else {
+                    Text("Scanned \(model.scannedCount) files")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
                 Spacer()
                 if model.isScanning {
-                    Button("Cancel") {
-                        model.cancelScan()
-                    }
-                    .buttonStyle(.bordered)
+                    Button("Cancel") { model.cancelScan() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                 }
             }
             if !model.currentScanningPath.isEmpty {
-                Text("Currently: \(model.currentScanningPath)")
+                Text(model.currentScanningPath)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
                     .truncationMode(.middle)
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func fmt(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 

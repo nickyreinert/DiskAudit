@@ -226,6 +226,8 @@ final class ScanViewModel: ObservableObject {
     @Published var progressValue: Double = 0
     @Published var progressLabel = "Ready"
     @Published var scannedCount: Int = 0
+    @Published var scannedSizeBytes: Int64 = 0
+    @Published var targetSizeBytes: Int64 = 0
 
     @Published var files: [AuditItem] = []
     @Published var folders: [AuditItem] = []
@@ -305,6 +307,8 @@ final class ScanViewModel: ObservableObject {
         progressValue = 0
         progressLabel = "Preparing scan..."
         scannedCount = 0
+        scannedSizeBytes = 0
+        targetSizeBytes = 0
         statusMessage = ""
         files = []
         folders = []
@@ -314,10 +318,32 @@ final class ScanViewModel: ObservableObject {
         currentTreeDrillPath = nil
         scanStartTime = Date()
 
+        // Quick pre-fetch: used space per unique volume (one syscall each, near-instant)
+        var seenVolumes = Set<String>()
+        var totalTarget: Int64 = 0
+        for root in allRoots {
+            let volKey: String
+            if let vals = try? root.resourceValues(forKeys: [.volumeURLKey]),
+               let vURL = vals.volume {
+                volKey = vURL.path
+            } else {
+                volKey = root.path
+            }
+            guard !seenVolumes.contains(volKey) else { continue }
+            seenVolumes.insert(volKey)
+            if let attr = try? FileManager.default.attributesOfFileSystem(forPath: root.path),
+               let sz = attr[.systemSize] as? Int64,
+               let fr = attr[.systemFreeSize] as? Int64 {
+                totalTarget += max(0, sz - fr)
+            }
+        }
+        targetSizeBytes = totalTarget
+
         scanTask = Task(priority: .userInitiated) {
             let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
             var seenPaths = Set<String>()
             var scannedCount = 0
+            var scannedBytes: Int64 = 0
 
             var heavyOrGarbageFiles: [AuditItem] = []
             var folderAccumulator: [String: Int64] = [:]
@@ -352,6 +378,7 @@ final class ScanViewModel: ObservableObject {
                     scannedCount += 1
 
                     guard let size = self.fileSize(for: fileURL) else { continue }
+                    scannedBytes += size
 
                     let cat = self.classify(path: path, isFolder: false)
                     let garbageReason = self.garbageReason(path: path, size: size)
@@ -378,9 +405,13 @@ final class ScanViewModel: ObservableObject {
 
                     if scannedCount % 200 == 0 {
                         let count = scannedCount
+                        let bytes = scannedBytes
                         await MainActor.run {
                             self.scannedCount = count
-                            self.progressLabel = "Scanning: \(count) files found..."
+                            self.scannedSizeBytes = bytes
+                            if self.targetSizeBytes > 0 {
+                                self.progressValue = min(0.98, Double(bytes) / Double(self.targetSizeBytes))
+                            }
                             self.currentScanningPath = path
                         }
                     }
@@ -412,8 +443,10 @@ final class ScanViewModel: ObservableObject {
             folderItems.sort { $0.sizeBytes > $1.sizeBytes }
 
             let finalCount = scannedCount
+            let finalBytes = scannedBytes
             await MainActor.run {
                 self.scannedCount = finalCount
+                self.scannedSizeBytes = finalBytes
                 self.files = heavyOrGarbageFiles
                 self.folders = folderItems
                 self.treeRoots = PathTreeBuilder.buildTree(from: self.files + self.folders)
