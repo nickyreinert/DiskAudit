@@ -271,7 +271,7 @@ final class ScanViewModel: ObservableObject {
                     errorHandler: { _, _ in true }
                 ) else { continue }
 
-                for case let fileURL as URL in enumerator {
+                while let fileURL = enumerator.nextObject() as? URL {
                     if Task.isCancelled { break outer }
 
                     let path = fileURL.path
