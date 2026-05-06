@@ -193,6 +193,7 @@ final class ScanViewModel: ObservableObject {
     @Published var currentScanningPath: String = ""
     @Published var excludedPaths: [String] = []
     @Published var currentDrillDownExtension: String? = nil
+    @Published var currentTreeDrillPath: String? = nil
 
     private var scanTask: Task<Void, Never>?
 
@@ -209,6 +210,7 @@ final class ScanViewModel: ObservableObject {
         lastScanTimestamp = nil
         hoveredItem = nil
         currentDrillDownExtension = nil
+        currentTreeDrillPath = nil
         statusMessage = "Scan results cleared."
         deleteScanResultsFile()
     }
@@ -233,6 +235,8 @@ final class ScanViewModel: ObservableObject {
         files = []
         folders = []
         hoveredItem = nil
+        currentDrillDownExtension = nil
+        currentTreeDrillPath = nil
 
         let thresholdBytes = Int64(max(1, minSizeMB)) * 1024 * 1024
 
@@ -517,6 +521,65 @@ final class ScanViewModel: ObservableObject {
     
     func isDrillDownable(_ item: AuditItem) -> Bool {
         return groupByFileType && viewMode == .files
+    }
+
+    var currentTreeRoots: [PathTreeNode] {
+        guard let drillPath = currentTreeDrillPath,
+              let node = findTreeNode(path: drillPath, in: treeRoots) else {
+            return treeRoots
+        }
+        return node.children
+    }
+
+    func drillDownTree(_ node: PathTreeNode) {
+        guard !node.children.isEmpty else { return }
+        currentTreeDrillPath = node.fullPath
+    }
+
+    func backFromTreeDrillDown() {
+        currentTreeDrillPath = nil
+    }
+
+    func openTreeNodeInFinder(_ node: PathTreeNode) {
+        let url = URL(fileURLWithPath: node.fullPath, isDirectory: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func queueTreeNode(_ node: PathTreeNode) {
+        queue(treeNodeAuditItem(node))
+    }
+
+    func unqueueTreeNode(_ node: PathTreeNode) {
+        unqueue(treeNodeAuditItem(node))
+    }
+
+    func isTreeNodeQueued(_ node: PathTreeNode) -> Bool {
+        isQueued(treeNodeAuditItem(node))
+    }
+
+    private func treeNodeAuditItem(_ node: PathTreeNode) -> AuditItem {
+        let category = classify(path: node.fullPath, isFolder: true)
+        let risk = riskLevel(category: category, garbageReason: nil, isFolder: true)
+        return AuditItem(
+            url: URL(fileURLWithPath: node.fullPath, isDirectory: true),
+            sizeBytes: node.totalSize,
+            kind: .folder,
+            category: category,
+            garbageReason: nil,
+            risk: risk
+        )
+    }
+
+    private func findTreeNode(path: String, in nodes: [PathTreeNode]) -> PathTreeNode? {
+        for node in nodes {
+            if node.fullPath == path {
+                return node
+            }
+            if let found = findTreeNode(path: path, in: node.children) {
+                return found
+            }
+        }
+        return nil
     }
 
     var fileCategorySizePreview: [ScanCategory: Int64] {
@@ -1340,7 +1403,21 @@ struct PathTreeRowView: View {
     let node: PathTreeNode
     @State private var isExpanded = false
     let depth: Int
-    let onTap: (PathTreeNode) -> Void
+    let levelMaxSize: Int64
+    let onDrillDown: (PathTreeNode) -> Void
+    let onShowInFinder: (PathTreeNode) -> Void
+    let onQueue: (PathTreeNode) -> Void
+    let onUnqueue: (PathTreeNode) -> Void
+    let isQueued: Bool
+
+    private var barRatio: CGFloat {
+        guard levelMaxSize > 0 else { return 0 }
+        return min(1, max(0, CGFloat(node.totalSize) / CGFloat(levelMaxSize)))
+    }
+
+    private var childrenMaxSize: Int64 {
+        max(node.children.map(\.totalSize).max() ?? 0, 1)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1383,13 +1460,63 @@ struct PathTreeRowView: View {
             .padding(.leading, CGFloat(depth) * 16)
             .padding(.trailing, 8)
             .contentShape(Rectangle())
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.secondary.opacity(0.12))
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isQueued ? Color.yellow.opacity(0.55) : Color.accentColor.opacity(0.55))
+                        .frame(width: max(4, geo.size.width * barRatio))
+                }
+                .frame(height: 12)
+            }
+            .frame(height: 12)
+            .padding(.leading, CGFloat(depth) * 16 + 16)
+            .padding(.trailing, 8)
+            .contentShape(Rectangle())
             .onTapGesture {
-                onTap(node)
+                let flags = NSEvent.modifierFlags
+                if flags.contains(.command) {
+                    onShowInFinder(node)
+                } else if flags.contains(.control) {
+                    onQueue(node)
+                } else {
+                    onDrillDown(node)
+                }
+            }
+            .contextMenu {
+                Button("Show in Finder") {
+                    onShowInFinder(node)
+                }
+                if isQueued {
+                    Button("Remove From Delete Queue") {
+                        onUnqueue(node)
+                    }
+                } else {
+                    Button("Add To Delete Queue") {
+                        onQueue(node)
+                    }
+                }
+                if !node.children.isEmpty {
+                    Button("Drill Down") {
+                        onDrillDown(node)
+                    }
+                }
             }
 
             if isExpanded {
                 ForEach(node.children) { child in
-                    PathTreeRowView(node: child, depth: depth + 1, onTap: onTap)
+                    PathTreeRowView(
+                        node: child,
+                        depth: depth + 1,
+                        levelMaxSize: childrenMaxSize,
+                        onDrillDown: onDrillDown,
+                        onShowInFinder: onShowInFinder,
+                        onQueue: onQueue,
+                        onUnqueue: onUnqueue,
+                        isQueued: isQueued
+                    )
                 }
             }
         }
@@ -1398,13 +1525,30 @@ struct PathTreeRowView: View {
 
 struct PathTreeView: View {
     let roots: [PathTreeNode]
-    let onNodeTap: (PathTreeNode) -> Void
+    let onDrillDown: (PathTreeNode) -> Void
+    let onShowInFinder: (PathTreeNode) -> Void
+    let onQueue: (PathTreeNode) -> Void
+    let onUnqueue: (PathTreeNode) -> Void
+    let isQueued: (PathTreeNode) -> Bool
+
+    private var rootMaxSize: Int64 {
+        max(roots.map(\.totalSize).max() ?? 0, 1)
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(roots) { root in
-                    PathTreeRowView(node: root, depth: 0, onTap: onNodeTap)
+                    PathTreeRowView(
+                        node: root,
+                        depth: 0,
+                        levelMaxSize: rootMaxSize,
+                        onDrillDown: onDrillDown,
+                        onShowInFinder: onShowInFinder,
+                        onQueue: onQueue,
+                        onUnqueue: onUnqueue,
+                        isQueued: isQueued(root)
+                    )
                     Divider()
                 }
             }
@@ -1951,11 +2095,31 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             )
                     } else {
-                        PathTreeView(roots: model.treeRoots) { node in
-                            let path = node.fullPath
-                            if let url = URL(string: "file://" + path) {
-                                NSWorkspace.shared.activateFileViewerSelecting([url])
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let drillPath = model.currentTreeDrillPath {
+                                HStack {
+                                    Button("Back") {
+                                        model.backFromTreeDrillDown()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    Text("Drill-down: \(drillPath)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                }
                             }
+
+                            PathTreeView(
+                                roots: model.currentTreeRoots,
+                                onDrillDown: { model.drillDownTree($0) },
+                                onShowInFinder: { model.openTreeNodeInFinder($0) },
+                                onQueue: { model.queueTreeNode($0) },
+                                onUnqueue: { model.unqueueTreeNode($0) },
+                                isQueued: { model.isTreeNodeQueued($0) }
+                            )
                         }
                         .background(Color(red: 0.94, green: 0.94, blue: 0.92))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
