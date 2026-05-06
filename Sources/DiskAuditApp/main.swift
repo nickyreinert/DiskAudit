@@ -190,6 +190,7 @@ final class ScanViewModel: ObservableObject {
     @Published var treeRoots: [PathTreeNode] = []
     @Published var lastScanTimestamp: Date?
     @Published var currentScanningPath: String = ""
+    @Published var excludedPaths: [String] = []
 
     private var scanTask: Task<Void, Never>?
 
@@ -583,7 +584,7 @@ final class ScanViewModel: ObservableObject {
             guard let enumerator = FileManager.default.enumerator(
                 at: root,
                 includingPropertiesForKeys: keys,
-                options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                options: [],
                 errorHandler: { _, _ in true }
             ) else {
                 continue
@@ -592,6 +593,13 @@ final class ScanViewModel: ObservableObject {
             for case let fileURL as URL in enumerator {
                 if Task.isCancelled { break }
                 let path = fileURL.path
+                
+                // Skip if path matches any excluded paths
+                if excludedPaths.contains(where: { path.hasPrefix($0) }) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                
                 if seen.contains(path) {
                     continue
                 }
@@ -1363,6 +1371,7 @@ struct SettingsSheetView: View {
     @ObservedObject var model: ScanViewModel
     let onClose: () -> Void
     @State private var showGarbagePaths = false
+    @State private var newExcludePath = \"\"
 
     private let systemGarbagePaths = [
         "/private/var/tmp",
@@ -1482,6 +1491,63 @@ struct SettingsSheetView: View {
                 }
             }
 
+            // Section 4: Exclude paths
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Skip specific folders during scan. Useful for network drives, external backups, or known huge unimportant directories.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    HStack(spacing: 4) {
+                        TextField("Enter path to exclude...", text: $newExcludePath)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Add") {
+                            let trimmed = newExcludePath.trimmingCharacters(in: .whitespaces)
+                            if !trimmed.isEmpty && !model.excludedPaths.contains(trimmed) {
+                                model.excludedPaths.append(trimmed)
+                                newExcludePath = ""
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(newExcludePath.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    
+                    if !model.excludedPaths.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(model.excludedPaths, id: \.self) { path in
+                                HStack {
+                                    Text(path)
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                    Button(action: {
+                                        model.excludedPaths.removeAll { $0 == path }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(4)
+                                .background(Color.secondary.opacity(0.08))
+                                .cornerRadius(4)
+                            }
+                        }
+                    } else {
+                        Text("No paths excluded (full scan enabled)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .italic()
+                    }
+                }
+                .padding(4)
+            } label: {
+                Label("Exclude Paths", systemImage: "xmark.bin.fill")
+                    .font(.subheadline.weight(.semibold))
+            }
+
             Spacer()
             HStack {
                 Spacer()
@@ -1490,7 +1556,7 @@ struct SettingsSheetView: View {
             }
         }
         .padding(16)
-        .frame(width: 690, height: 580)
+        .frame(width: 690, height: 680)
     }
 }
 
