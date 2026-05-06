@@ -41,8 +41,13 @@ struct ProgressPanelView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Scanning selected locations")
                 .font(.headline)
-            ProgressView(value: model.progressValue)
-                .progressViewStyle(.linear)
+            if model.progressValue >= 1 {
+                ProgressView(value: 1.0)
+                    .progressViewStyle(.linear)
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+            }
             Text(model.progressLabel)
                 .font(.callout)
                 .foregroundStyle(.secondary)

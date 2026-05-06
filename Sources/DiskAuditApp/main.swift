@@ -245,54 +245,74 @@ final class ScanViewModel: ObservableObject {
         currentTreeDrillPath = nil
 
         scanTask = Task(priority: .userInitiated) {
-            let allFiles = self.collectAllRegularFiles(in: allRoots)
-            let total = max(1, allFiles.count)
+            let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+            var seenPaths = Set<String>()
+            var scannedCount = 0
 
             var heavyOrGarbageFiles: [AuditItem] = []
             var folderAccumulator: [String: Int64] = [:]
             var folderGarbageCount: [String: Int] = [:]
 
-            for (index, fileURL) in allFiles.enumerated() {
-                if Task.isCancelled { break }
+            outer: for root in allRoots {
+                guard let enumerator = FileManager.default.enumerator(
+                    at: root,
+                    includingPropertiesForKeys: resourceKeys,
+                    options: [],
+                    errorHandler: { _, _ in true }
+                ) else { continue }
 
-                guard let size = self.fileSize(for: fileURL) else { continue }
+                for case let fileURL as URL in enumerator {
+                    if Task.isCancelled { break outer }
 
-                let path = fileURL.path
-                let cat = self.classify(path: path, isFolder: false)
-                let garbageReason = self.garbageReason(path: path, size: size)
-                let insideHeavyRoot = heavyRoots.contains { path.hasPrefix($0.path) }
-                let insideGarbageRoot = garbageRoots.contains { path.hasPrefix($0.path) }
+                    let path = fileURL.path
 
-                let includeHeavy = insideHeavyRoot
-                let includeGarbage = garbageReason != nil && insideGarbageRoot
-
-                if includeHeavy || includeGarbage {
-                    let risk = self.riskLevel(category: cat, garbageReason: garbageReason, isFolder: false)
-                    heavyOrGarbageFiles.append(
-                        AuditItem(
-                            url: fileURL,
-                            sizeBytes: size,
-                            kind: .file,
-                            category: cat,
-                            garbageReason: garbageReason,
-                            risk: risk
-                        )
-                    )
-
-                    self.accumulateAncestors(of: fileURL, size: size, roots: allRoots, store: &folderAccumulator)
-
-                    if garbageReason != nil {
-                        self.accumulateGarbageAncestors(of: fileURL, roots: allRoots, store: &folderGarbageCount)
+                    if self.excludedPaths.contains(where: { path.hasPrefix($0) }) {
+                        enumerator.skipDescendants()
+                        continue
                     }
-                }
+                    if seenPaths.contains(path) { continue }
 
-                if index % 120 == 0 || index == total - 1 {
-                    let progress = Double(index + 1) / Double(total)
-                    await MainActor.run {
-                        self.scannedCount = index + 1
-                        self.progressValue = progress
-                        self.progressLabel = "Scanning files: \(index + 1) of \(total)"
-                        self.currentScanningPath = fileURL.path
+                    do {
+                        let values = try fileURL.resourceValues(forKeys: Set(resourceKeys))
+                        if values.isSymbolicLink == true { continue }
+                        guard values.isRegularFile == true else { continue }
+                    } catch { continue }
+
+                    seenPaths.insert(path)
+                    scannedCount += 1
+
+                    guard let size = self.fileSize(for: fileURL) else { continue }
+
+                    let cat = self.classify(path: path, isFolder: false)
+                    let garbageReason = self.garbageReason(path: path, size: size)
+                    let insideHeavyRoot = heavyRoots.contains { path.hasPrefix($0.path) }
+                    let insideGarbageRoot = garbageRoots.contains { path.hasPrefix($0.path) }
+
+                    if insideHeavyRoot || (garbageReason != nil && insideGarbageRoot) {
+                        let risk = self.riskLevel(category: cat, garbageReason: garbageReason, isFolder: false)
+                        heavyOrGarbageFiles.append(
+                            AuditItem(
+                                url: fileURL,
+                                sizeBytes: size,
+                                kind: .file,
+                                category: cat,
+                                garbageReason: garbageReason,
+                                risk: risk
+                            )
+                        )
+                        self.accumulateAncestors(of: fileURL, size: size, roots: allRoots, store: &folderAccumulator)
+                        if garbageReason != nil {
+                            self.accumulateGarbageAncestors(of: fileURL, roots: allRoots, store: &folderGarbageCount)
+                        }
+                    }
+
+                    if scannedCount % 200 == 0 {
+                        let count = scannedCount
+                        await MainActor.run {
+                            self.scannedCount = count
+                            self.progressLabel = "Scanning: \(count) files found..."
+                            self.currentScanningPath = path
+                        }
                     }
                 }
             }
@@ -321,14 +341,16 @@ final class ScanViewModel: ObservableObject {
             heavyOrGarbageFiles.sort { $0.sizeBytes > $1.sizeBytes }
             folderItems.sort { $0.sizeBytes > $1.sizeBytes }
 
+            let finalCount = scannedCount
             await MainActor.run {
+                self.scannedCount = finalCount
                 self.files = heavyOrGarbageFiles
                 self.folders = folderItems
                 self.treeRoots = PathTreeBuilder.buildTree(from: self.files + self.folders)
                 self.lastScanTimestamp = Date()
                 self.isScanning = false
                 self.progressValue = 1
-                self.progressLabel = "Finished"
+                self.progressLabel = "Finished — \(finalCount) files scanned"
                 self.currentScanningPath = ""
                 self.statusMessage = "Scan finished. Found \(self.files.count) file candidates and \(self.folders.count) folder candidates."
                 self.saveScanResults()
@@ -730,51 +752,6 @@ final class ScanViewModel: ObservableObject {
             seen.insert(p)
             return FileManager.default.fileExists(atPath: p)
         }
-    }
-
-    private func collectAllRegularFiles(in roots: [URL]) -> [URL] {
-        var result: [URL] = []
-        var seen = Set<String>()
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
-
-        for root in roots {
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: keys,
-                options: [],
-                errorHandler: { _, _ in true }
-            ) else {
-                continue
-            }
-
-            for case let fileURL as URL in enumerator {
-                if Task.isCancelled { break }
-                let path = fileURL.path
-                
-                // Skip if path matches any excluded paths
-                if excludedPaths.contains(where: { path.hasPrefix($0) }) {
-                    enumerator.skipDescendants()
-                    continue
-                }
-                
-                if seen.contains(path) {
-                    continue
-                }
-
-                do {
-                    let values = try fileURL.resourceValues(forKeys: Set(keys))
-                    if values.isSymbolicLink == true { continue }
-                    if values.isRegularFile == true {
-                        seen.insert(path)
-                        result.append(fileURL)
-                    }
-                } catch {
-                    continue
-                }
-            }
-        }
-
-        return result
     }
 
     private func fileSize(for url: URL) -> Int64? {
