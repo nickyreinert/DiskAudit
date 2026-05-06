@@ -223,6 +223,11 @@ struct TreemapLayout {
     static func squarified(items: [AuditItem], in rect: CGRect) -> [Entry] {
         guard rect.width > 0, rect.height > 0, !items.isEmpty else { return [] }
 
+        // Single item: fill the whole canvas
+        if items.count == 1 {
+            return [Entry(item: items[0], rect: rect)]
+        }
+
         let sorted = items.sorted { $0.sizeBytes > $1.sizeBytes }
         let totalWeight = max(sorted.reduce(Int64(0)) { $0 + $1.sizeBytes }, 1)
         let targetCells = min(700, max(220, sorted.count * 8))
@@ -247,13 +252,13 @@ struct TreemapLayout {
 
             let originX = rect.minX + CGFloat(cursorX) * cellSide
             let originY = rect.minY + CGFloat(cursorY) * cellSide
-            let side = CGFloat(sideCells) * cellSide - spacing
+            // Clamp height so dominant items don't overflow and get dropped
+            let rawSide = CGFloat(sideCells) * cellSide - spacing
+            let side = min(rawSide, rect.maxY - originY - spacing)
 
-            if originY + side > rect.maxY {
-                break
-            }
+            if side < 2 { break }
 
-            let itemRect = CGRect(x: originX, y: originY, width: side, height: side)
+            let itemRect = CGRect(x: originX, y: originY, width: rawSide, height: side)
             entries.append(Entry(item: item, rect: itemRect))
 
             cursorX += sideCells
@@ -288,97 +293,105 @@ struct PathTreeRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
+                // expand / leaf icon
                 if !node.children.isEmpty {
                     Button(action: { isExpanded.toggle() }) {
                         Image(systemName: isExpanded ? "triangle.fill" : "triangle")
                             .font(.system(size: 8, weight: .semibold))
-                            .frame(width: 12, height: 12)
+                            .frame(width: 14, height: 14)
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Image(systemName: "square.fill")
-                        .font(.system(size: 6))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12, height: 12)
+                    Image(systemName: "doc.fill")
+                        .font(.system(size: 7))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 14, height: 14)
                 }
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(node.name.isEmpty ? "/" : node.name)
-                        .font(.caption)
-                        .lineLimit(1)
-                    if !node.children.isEmpty {
-                        Text(ByteCountFormatter.string(fromByteCount: node.totalSize, countStyle: .file))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                // ── bar with text inside ──
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        // track
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.secondary.opacity(0.10))
+                        // fill
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(isQueued
+                                  ? Color.yellow.opacity(0.45)
+                                  : Color.accentColor.opacity(0.40))
+                            .frame(width: max(4, geo.size.width * barRatio))
+                        // text overlay
+                        VStack(alignment: .leading, spacing: 2) {
+                            // row 1: name
+                            Text(node.name.isEmpty ? "/" : node.name)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            // row 2: size  |  subfolders  |  files
+                            HStack(spacing: 10) {
+                                Text(ByteCountFormatter.string(
+                                    fromByteCount: node.children.isEmpty ? node.sizeBytes : node.totalSize,
+                                    countStyle: .file))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.primary.opacity(0.75))
+                                    .fontWeight(.semibold)
+                                let subFolders = node.children.filter { !$0.children.isEmpty }.count
+                                let fileLeaves = node.children.filter {  $0.children.isEmpty }.count
+                                if subFolders > 0 {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "folder.fill")
+                                            .font(.system(size: 9))
+                                        Text("\(subFolders)")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundStyle(.secondary)
+                                }
+                                if fileLeaves > 0 {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "doc.fill")
+                                            .font(.system(size: 9))
+                                        Text("\(fileLeaves)")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
                     }
                 }
-
-                Spacer()
-
-                if node.children.isEmpty {
-                    Text(ByteCountFormatter.string(fromByteCount: node.sizeBytes, countStyle: .file))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                .frame(height: 44)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    let flags = NSEvent.modifierFlags
+                    if flags.contains(.command) {
+                        onShowInFinder(node)
+                    } else if flags.contains(.control) {
+                        onQueue(node)
+                    } else {
+                        onDrillDown(node)
+                    }
+                }
+                .contextMenu {
+                    Button("Show in Finder") { onShowInFinder(node) }
+                    if isQueued {
+                        Button("Remove From Delete Queue") { onUnqueue(node) }
+                    } else {
+                        Button("Add To Delete Queue") { onQueue(node) }
+                    }
+                    Button("Drill Down") { onDrillDown(node) }
+                        .disabled(node.children.isEmpty)
+                    Button(isWatched ? "Unwatch" : "Watch") { onWatch(node) }
+                    Divider()
+                    Button("Left Click: Drill Down") {}.disabled(true)
+                    Button("CTRL+Click: Add To Delete Queue") {}.disabled(true)
+                    Button("CMD+Click: Show in Finder") {}.disabled(true)
                 }
             }
-            .padding(.vertical, 6)
             .padding(.leading, CGFloat(depth) * 16)
             .padding(.trailing, 8)
-            .contentShape(Rectangle())
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.secondary.opacity(0.12))
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(isQueued ? Color.yellow.opacity(0.55) : Color.accentColor.opacity(0.55))
-                        .frame(width: max(4, geo.size.width * barRatio))
-                }
-                .frame(height: 12)
-            }
-            .frame(height: 12)
-            .padding(.leading, CGFloat(depth) * 16 + 16)
-            .padding(.trailing, 8)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                let flags = NSEvent.modifierFlags
-                if flags.contains(.command) {
-                    onShowInFinder(node)
-                } else if flags.contains(.control) {
-                    onQueue(node)
-                } else {
-                    onDrillDown(node)
-                }
-            }
-            .contextMenu {
-                Button("Show in Finder") {
-                    onShowInFinder(node)
-                }
-                if isQueued {
-                    Button("Remove From Delete Queue") {
-                        onUnqueue(node)
-                    }
-                } else {
-                    Button("Add To Delete Queue") {
-                        onQueue(node)
-                    }
-                }
-                Button("Drill Down") {
-                    onDrillDown(node)
-                }
-                .disabled(node.children.isEmpty)
-                Button(isWatched ? "Unwatch" : "Watch") {
-                    onWatch(node)
-                }
-                Divider()
-                Button("Left Click: Drill Down") {}
-                    .disabled(true)
-                Button("CTRL+Click: Add To Delete Queue") {}
-                    .disabled(true)
-                Button("CMD+Click: Show in Finder") {}
-                    .disabled(true)
-            }
+            .padding(.vertical, 2)
 
             if isExpanded {
                 ForEach(node.children) { child in

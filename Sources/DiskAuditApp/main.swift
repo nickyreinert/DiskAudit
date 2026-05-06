@@ -174,6 +174,37 @@ enum WatchedItemKind: String, Codable {
     case folderName     // synthetic tile in Folder Types view (keyed by folder name)
 }
 
+// MARK: - Ignore Rules
+
+enum IgnoreRuleKind: String, Codable, CaseIterable {
+    case path        = "Full Path"
+    case fileExtension = "File Extension"
+    case folderName  = "Folder Name"
+}
+
+struct IgnoreRule: Identifiable, Codable {
+    let id: UUID
+    let kind: IgnoreRuleKind
+    /// For path: absolute path. For fileExtension: bare ext (no dot). For folderName: last component.
+    let identifier: String
+    let addedDate: Date
+
+    init(id: UUID = UUID(), kind: IgnoreRuleKind, identifier: String) {
+        self.id = id
+        self.kind = kind
+        self.identifier = identifier
+        self.addedDate = Date()
+    }
+
+    var displayLabel: String {
+        switch kind {
+        case .path:         return identifier
+        case .fileExtension: return ".\(identifier)"
+        case .folderName:   return "📁 \(identifier)"
+        }
+    }
+}
+
 struct WatchedItem: Identifiable, Codable {
     let id: UUID
     let kind: WatchedItemKind
@@ -254,6 +285,7 @@ final class ScanViewModel: ObservableObject {
     @Published var watchList: [WatchedItem] = []
     @Published var watchListFilterEnabled: Bool = false
     @Published var scanHistory: [ScanHistoryEntry] = []
+    @Published var ignoreRules: [IgnoreRule] = []
     /// Aggregated size+count for files that were below the minSizeMB threshold.
     /// Keyed by file extension (lowercased). Feeds into groupedByExtension.
     @Published var smallFilesByExtension: [String: (size: Int64, count: Int)] = [:]
@@ -279,6 +311,7 @@ final class ScanViewModel: ObservableObject {
         loadScanResults()
         loadWatchList()
         loadScanHistory()
+        loadIgnoreRules()
     }
 
     func clearScanResults() {
@@ -371,6 +404,10 @@ final class ScanViewModel: ObservableObject {
                     let path = fileURL.path
 
                     if self.excludedPaths.contains(where: { path.hasPrefix($0) }) {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    if self.isIgnoredPath(path) {
                         enumerator.skipDescendants()
                         continue
                     }
@@ -492,6 +529,78 @@ final class ScanViewModel: ObservableObject {
                 self.scanStartTime = nil
             }
         }
+    }
+
+    // MARK: - Ignore Rules helpers
+
+    func addIgnoreRule(_ rule: IgnoreRule) {
+        guard !ignoreRules.contains(where: { $0.kind == rule.kind && $0.identifier == rule.identifier }) else { return }
+        ignoreRules.append(rule)
+        saveIgnoreRules()
+    }
+
+    func removeIgnoreRule(_ rule: IgnoreRule) {
+        ignoreRules.removeAll { $0.id == rule.id }
+        saveIgnoreRules()
+    }
+
+    /// Returns true if a file path should be suppressed (scan + render)
+    func isIgnoredPath(_ path: String) -> Bool {
+        for rule in ignoreRules {
+            switch rule.kind {
+            case .path:
+                if path == rule.identifier || path.hasPrefix(rule.identifier + "/") { return true }
+            case .fileExtension:
+                let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+                if ext == rule.identifier.lowercased() { return true }
+            case .folderName:
+                // suppress any folder (or file inside a folder) whose last component matches
+                let parts = path.split(separator: "/")
+                if parts.contains(Substring(rule.identifier)) { return true }
+            }
+        }
+        return false
+    }
+
+    /// Context-menu helper: ignore the right thing based on current view mode
+    func ignoreItem(_ item: AuditItem) {
+        switch viewMode {
+        case .fileTypes where currentDrillDownExtension == nil:
+            let ext = item.url.lastPathComponent.lowercased()
+            addIgnoreRule(IgnoreRule(kind: .fileExtension, identifier: ext))
+        case .folderTypes where currentDrillDownFolderName == nil:
+            addIgnoreRule(IgnoreRule(kind: .folderName, identifier: item.url.lastPathComponent))
+        default:
+            addIgnoreRule(IgnoreRule(kind: .path, identifier: item.url.path))
+        }
+    }
+
+    func ignoreTreeNode(_ node: PathTreeNode) {
+        if node.children.isEmpty {
+            addIgnoreRule(IgnoreRule(kind: .path, identifier: node.fullPath))
+        } else {
+            addIgnoreRule(IgnoreRule(kind: .folderName, identifier: node.name))
+        }
+    }
+
+    private func saveIgnoreRules() {
+        guard let fileURL = ignoreRulesFileURL() else { return }
+        if let data = try? JSONEncoder().encode(ignoreRules) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    private func loadIgnoreRules() {
+        guard let fileURL = ignoreRulesFileURL(),
+              FileManager.default.fileExists(atPath: fileURL.path),
+              let data = try? Data(contentsOf: fileURL),
+              let loaded = try? JSONDecoder().decode([IgnoreRule].self, from: data) else { return }
+        ignoreRules = loaded
+    }
+
+    private func ignoreRulesFileURL() -> URL? {
+        guard let dir = appSupportDir() else { return nil }
+        return dir.appendingPathComponent("ignore_rules.json", isDirectory: false)
     }
 
     func cancelScan() {
@@ -616,13 +725,37 @@ final class ScanViewModel: ObservableObject {
             source = folders
         }
         guard !selectedCategories.isEmpty, !selectedRisks.isEmpty else { return [] }
-        return source.filter { item in
+        var result = source.filter { item in
             let riskPass = selectedRisks.contains(item.risk)
             let categoryPass = selectedCategories.contains(item.category)
             let scopePass = matchesViewCategoryFilter(item)
             let watchPass = !watchListFilterEnabled || isWatched(item)
-            return riskPass && categoryPass && scopePass && watchPass
+            let ignorePass = !isIgnoredPath(item.url.path)
+            return riskPass && categoryPass && scopePass && watchPass && ignorePass
         }
+
+        // When watchlist filter is active in file views, inject aggregate items for
+        // watched extensions whose files are all below the size threshold (small files).
+        if watchListFilterEnabled && (viewMode == .files || viewMode == .fileTypes) {
+            let coveredExts = Set(result.map { $0.url.pathExtension.lowercased() })
+            for w in watchList where w.kind == .fileExtension {
+                let ext = w.identifier.lowercased()
+                guard !coveredExts.contains(ext),
+                      let data = smallFilesByExtension[ext], data.size > 0 else { continue }
+                let cat = categoryForExtension(ext)
+                let risk = riskLevel(category: cat, garbageReason: nil, isFolder: false)
+                result.append(AuditItem(
+                    url: URL(fileURLWithPath: "/\(ext)", isDirectory: false),
+                    sizeBytes: data.size,
+                    kind: .file,
+                    category: cat,
+                    garbageReason: "\(data.count) small files (each < \(minSizeMB) MB)",
+                    risk: risk
+                ))
+            }
+        }
+
+        return result
     }
 
     var groupedByExtension: [AuditItem] {
@@ -787,6 +920,7 @@ final class ScanViewModel: ObservableObject {
             selectedRisks.contains(item.risk)
             && selectedCategories.contains(item.category)
             && matchesViewCategoryFilter(item)
+            && !isIgnoredPath(item.url.path)
         }
     }
     
@@ -1397,8 +1531,27 @@ final class ScanViewModel: ObservableObject {
     }
 
     func isWatched(_ item: AuditItem) -> Bool {
-        let kind: WatchedItemKind = item.kind == .folder ? .folder : .file
-        return watchList.contains { $0.kind == kind && $0.identifier == item.url.path }
+        for w in watchList {
+            switch w.kind {
+            case .file:
+                // exact file path
+                if item.kind == .file && item.url.path == w.identifier { return true }
+            case .folder:
+                // exact folder, OR any file that lives inside this folder
+                if item.kind == .folder && item.url.path == w.identifier { return true }
+                if item.kind == .file  && item.url.path.hasPrefix(w.identifier + "/") { return true }
+            case .fileExtension:
+                // all files whose extension matches
+                if item.kind == .file {
+                    let ext = item.url.pathExtension.lowercased()
+                    if ext == w.identifier.lowercased() { return true }
+                }
+            case .folderName:
+                // all folders whose last path component matches
+                if item.kind == .folder && item.url.lastPathComponent == w.identifier { return true }
+            }
+        }
+        return false
     }
 
     func isWatchedByPath(_ path: String) -> Bool {
