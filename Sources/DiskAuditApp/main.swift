@@ -1017,27 +1017,49 @@ final class ScanViewModel: ObservableObject {
     private func saveScanResults() {
         guard let fileURL = scanResultsFileURL() else { return }
 
+        struct SavedAuditItem: Codable {
+            let path: String
+            let sizeBytes: Int64
+            let kind: String
+            let category: String
+            let garbageReason: String?
+            let risk: String
+        }
+
         struct SavedScanData: Codable {
             let timestamp: String
-            let filesCount: Int
-            let foldersCount: Int
-            let totalSize: Int64
-
-            init(timestamp: Date, files: [AuditItem], folders: [AuditItem]) {
-                let formatter = ISO8601DateFormatter()
-                self.timestamp = formatter.string(from: timestamp)
-                self.filesCount = files.count
-                self.foldersCount = folders.count
-                self.totalSize = (files + folders).reduce(0) { $0 + $1.sizeBytes }
-            }
+            let files: [SavedAuditItem]
+            let folders: [SavedAuditItem]
         }
 
         guard let timestamp = lastScanTimestamp else { return }
-        let data = SavedScanData(timestamp: timestamp, files: files, folders: folders)
+        let formatter = ISO8601DateFormatter()
+        let data = SavedScanData(
+            timestamp: formatter.string(from: timestamp),
+            files: files.map {
+                SavedAuditItem(
+                    path: $0.url.path,
+                    sizeBytes: $0.sizeBytes,
+                    kind: $0.kind.rawValue,
+                    category: $0.category.rawValue,
+                    garbageReason: $0.garbageReason,
+                    risk: $0.risk.rawValue
+                )
+            },
+            folders: folders.map {
+                SavedAuditItem(
+                    path: $0.url.path,
+                    sizeBytes: $0.sizeBytes,
+                    kind: $0.kind.rawValue,
+                    category: $0.category.rawValue,
+                    garbageReason: $0.garbageReason,
+                    risk: $0.risk.rawValue
+                )
+            }
+        )
 
         do {
             let encoder = JSONEncoder()
-            encoder.outputFormatting = .prettyPrinted
             let jsonData = try encoder.encode(data)
             try jsonData.write(to: fileURL, options: .atomic)
         } catch {
@@ -1052,11 +1074,19 @@ final class ScanViewModel: ObservableObject {
             return
         }
 
+        struct SavedAuditItem: Codable {
+            let path: String
+            let sizeBytes: Int64
+            let kind: String
+            let category: String
+            let garbageReason: String?
+            let risk: String
+        }
+
         struct SavedScanData: Codable {
             let timestamp: String
-            let filesCount: Int
-            let foldersCount: Int
-            let totalSize: Int64
+            let files: [SavedAuditItem]
+            let folders: [SavedAuditItem]
         }
 
         do {
@@ -1065,6 +1095,40 @@ final class ScanViewModel: ObservableObject {
             let formatter = ISO8601DateFormatter()
             if let timestamp = formatter.date(from: data.timestamp) {
                 lastScanTimestamp = timestamp
+
+                files = data.files.compactMap { saved in
+                    guard let kind = AuditItemKind(rawValue: saved.kind),
+                          let category = ScanCategory(rawValue: saved.category),
+                          let risk = RiskLevel(rawValue: saved.risk) else {
+                        return nil
+                    }
+                    return AuditItem(
+                        url: URL(fileURLWithPath: saved.path, isDirectory: kind == .folder),
+                        sizeBytes: saved.sizeBytes,
+                        kind: kind,
+                        category: category,
+                        garbageReason: saved.garbageReason,
+                        risk: risk
+                    )
+                }
+
+                folders = data.folders.compactMap { saved in
+                    guard let kind = AuditItemKind(rawValue: saved.kind),
+                          let category = ScanCategory(rawValue: saved.category),
+                          let risk = RiskLevel(rawValue: saved.risk) else {
+                        return nil
+                    }
+                    return AuditItem(
+                        url: URL(fileURLWithPath: saved.path, isDirectory: kind == .folder),
+                        sizeBytes: saved.sizeBytes,
+                        kind: kind,
+                        category: category,
+                        garbageReason: saved.garbageReason,
+                        risk: risk
+                    )
+                }
+
+                treeRoots = PathTreeBuilder.buildTree(from: files + folders)
                 statusMessage = "Loaded previous scan results from \(timestamp.formatted(date: .numeric, time: .standard))"
             }
         } catch {
@@ -1217,6 +1281,7 @@ struct TreemapTile: View {
     let onHoverChanged: (AuditItem?) -> Void
     let onDrillDown: () -> Void
     let isDrillDownable: Bool
+    let extraSizeLabel: String?
 
     var body: some View {
         let minLabelW: CGFloat = 95
@@ -1254,6 +1319,12 @@ struct TreemapTile: View {
                             .font(.caption2)
                             .foregroundStyle(.white.opacity(0.95))
                             .lineLimit(1)
+                        if let extraSizeLabel {
+                            Text(extraSizeLabel)
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.95))
+                                .lineLimit(1)
+                        }
                         if let reason = item.garbageReason {
                             Text(reason)
                                 .font(.caption2)
@@ -1308,6 +1379,7 @@ struct TreemapCanvas: View {
     let onHoverChanged: (AuditItem?) -> Void
     let onDrillDown: (AuditItem) -> Void
     let isDrillDownable: (AuditItem) -> Bool
+    let extraSizeLabel: (AuditItem) -> String?
 
     var body: some View {
         GeometryReader { geo in
@@ -1327,7 +1399,8 @@ struct TreemapCanvas: View {
                         onUnqueue: { onUnqueue(entry.item) },
                         onHoverChanged: onHoverChanged,
                         onDrillDown: { onDrillDown(entry.item) },
-                        isDrillDownable: isDrillDownable(entry.item)
+                        isDrillDownable: isDrillDownable(entry.item),
+                        extraSizeLabel: extraSizeLabel(entry.item)
                     )
                     .position(x: entry.rect.midX, y: entry.rect.midY)
                     .frame(width: entry.rect.width, height: entry.rect.height)
@@ -2216,7 +2289,13 @@ struct ContentView: View {
                         onUnqueue: { model.unqueue($0) },
                         onHoverChanged: { model.hoveredItem = $0 },
                         onDrillDown: { model.drillDown($0) },
-                        isDrillDownable: { model.isDrillDownable($0) }
+                        isDrillDownable: { model.isDrillDownable($0) },
+                        extraSizeLabel: {
+                            if model.viewMode == .fileTypes && model.currentDrillDownExtension == nil {
+                                return "\(model.groupedFileCount(for: $0)) files"
+                            }
+                            return nil
+                        }
                     )
                     }
                 }
