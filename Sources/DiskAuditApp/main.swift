@@ -189,6 +189,7 @@ final class ScanViewModel: ObservableObject {
     @Published var hoveredItem: AuditItem?
     @Published var treeRoots: [PathTreeNode] = []
     @Published var lastScanTimestamp: Date?
+    @Published var currentScanningPath: String = ""
 
     private var scanTask: Task<Void, Never>?
 
@@ -279,6 +280,7 @@ final class ScanViewModel: ObservableObject {
                         self.scannedCount = index + 1
                         self.progressValue = progress
                         self.progressLabel = "Scanning files: \(index + 1) of \(total)"
+                        self.currentScanningPath = fileURL.path
                     }
                 }
             }
@@ -315,6 +317,7 @@ final class ScanViewModel: ObservableObject {
                 self.isScanning = false
                 self.progressValue = 1
                 self.progressLabel = "Finished"
+                self.currentScanningPath = ""
                 self.statusMessage = "Scan finished. Found \(self.files.count) file candidates and \(self.folders.count) folder candidates."
                 self.saveScanResults()
             }
@@ -326,6 +329,7 @@ final class ScanViewModel: ObservableObject {
         scanTask = nil
         isScanning = false
         progressLabel = "Cancelled"
+        currentScanningPath = ""
     }
 
     func openInFinder(_ item: AuditItem) {
@@ -950,6 +954,13 @@ struct ProgressPanelView: View {
                     .buttonStyle(.bordered)
                 }
             }
+            if !model.currentScanningPath.isEmpty {
+                Text("Currently: \(model.currentScanningPath)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1314,70 +1325,172 @@ struct PathTreeView: View {
     }
 }
 
-struct SettingsSheetView: View {
-    @ObservedObject var model: ScanViewModel
+struct AboutSheetView: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Scan Settings")
-                .font(.title3.bold())
-            Text("Select focused roots for huge-item scan and enable broader garbage scan for system locations.")
+        VStack(alignment: .leading, spacing: 16) {
+            Text("DISK AUDIT")
+                .font(.title2.bold())
+            Text("A macOS disk space visualizer with treemap view, category filters, risk levels and cleanup workflow.")
                 .foregroundStyle(.secondary)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
 
-            Toggle("Include system-wide garbage roots (recommended)", isOn: $model.includeSystemGarbageScan)
-                .disabled(model.includeFullDiskGarbageDeepScan)
-            Toggle("Deep full-disk garbage scan (very slow)", isOn: $model.includeFullDiskGarbageDeepScan)
-                .help("Uses /System/Volumes/Data as garbage root and can take a long time.")
+            Divider()
 
-            HStack(spacing: 8) {
-                Button("Select All Locations") {
-                    model.setAllLocations(enabled: true)
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.includeFullDiskGarbageDeepScan)
-
-                Button("Deselect All Locations") {
-                    model.setAllLocations(enabled: false)
-                }
-                .buttonStyle(.bordered)
-                .disabled(model.includeFullDiskGarbageDeepScan)
-
-                Spacer()
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Institut für digitale Herausforderungen")
+                    .font(.headline)
+                Link("institut-fdh.de", destination: URL(string: "https://institut-fdh.de")!)
+                Link("Buy me a coffee", destination: URL(string: "https://buymeacoffee.com/nickyreinert")!)
+                Link("GitHub: nickyreinert/DiskAudit", destination: URL(string: "https://github.com/nickyreinert/DiskAudit")!)
             }
 
-            List {
-                ForEach(model.scanLocations) { location in
-                    Toggle(isOn: Binding(
-                        get: { location.isEnabled },
-                        set: { _ in model.toggleLocation(location) }
-                    )) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(location.title)
-                            Text(location.url.path)
+            Spacer()
+            HStack {
+                Spacer()
+                Button("Close") { onClose() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 420, height: 300)
+    }
+}
+
+struct SettingsSheetView: View {
+    @ObservedObject var model: ScanViewModel
+    let onClose: () -> Void
+    @State private var showGarbagePaths = false
+
+    private let systemGarbagePaths = [
+        "/private/var/tmp",
+        "/private/var/log",
+        "/Library/Caches",
+        "/Library/Logs",
+        "/System/Volumes/Data/private/var/tmp",
+        "/System/Volumes/Data/private/var/log",
+        "/System/Volumes/Data/Library/Caches",
+        "/System/Volumes/Data/Library/Logs",
+        "/System/Volumes/Data/Users",
+        "/System/Volumes/Data/Applications"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Scan Settings")
+                .font(.title3.bold())
+
+            // Section 1: Full scan toggle
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(isOn: $model.includeFullDiskGarbageDeepScan) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Full Disk Scan")
+                                .font(.headline)
+                            Text("Scans everything starting from /. Very slow, but finds all large files and garbage across the entire disk. All custom location settings below are ignored.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
+                .padding(4)
+            } label: {
+                Label("Scan Mode", systemImage: "scope")
+                    .font(.subheadline.weight(.semibold))
             }
-            .frame(minHeight: 280)
-            .disabled(model.includeFullDiskGarbageDeepScan)
-            .opacity(model.includeFullDiskGarbageDeepScan ? 0.45 : 1)
 
-            HStack {
-                Text(model.includeFullDiskGarbageDeepScan ? "Deep full scan is active: location and garbage root switches are locked because the whole Data volume is scanned." : "Hint: location selection controls huge-item scan; garbage scan can be extended system-wide using toggles above.")
+            if model.includeFullDiskGarbageDeepScan {
+                Text("Full disk scan is active — all location and garbage root settings are locked.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Button("Done") {
-                    onClose()
+                    .padding(.horizontal, 4)
+            } else {
+                // Section 2: Custom locations
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Choose which folders to scan for large files.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Select All") { model.setAllLocations(enabled: true) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                        List {
+                            ForEach(model.scanLocations) { location in
+                                Toggle(isOn: Binding(
+                                    get: { location.isEnabled },
+                                    set: { _ in model.toggleLocation(location) }
+                                )) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(location.title)
+                                        Text(location.url.path)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        .frame(minHeight: 200)
+                    }
+                    .padding(4)
+                } label: {
+                    Label("Your Locations", systemImage: "folder")
+                        .font(.subheadline.weight(.semibold))
                 }
-                .buttonStyle(.borderedProminent)
+
+                // Section 3: System garbage roots
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(isOn: $model.includeSystemGarbageScan) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Include system garbage locations")
+                                Text("Also scans common system temp, cache, and log folders for garbage candidates (zero-byte files, partials, old logs, etc.).")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+
+                        if model.includeSystemGarbageScan {
+                            DisclosureGroup(isExpanded: $showGarbagePaths) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    ForEach(systemGarbagePaths, id: \.self) { path in
+                                        if FileManager.default.fileExists(atPath: path) {
+                                            Text(path)
+                                                .font(.system(.caption2, design: .monospaced))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                                .padding(.top, 4)
+                            } label: {
+                                Text("Show scanned system paths")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(4)
+                } label: {
+                    Label("System Garbage Roots", systemImage: "trash")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+
+            Spacer()
+            HStack {
+                Spacer()
+                Button("Done") { onClose() }
+                    .buttonStyle(.borderedProminent)
             }
         }
         .padding(16)
-        .frame(width: 690, height: 490)
+        .frame(width: 690, height: 580)
     }
 }
 
@@ -1388,7 +1501,7 @@ struct DeleteQueueSheetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Delete Queue")
+            Text("Deletion Queue")
                 .font(.title3.bold())
             Text("Review queued items and verify generated rm commands before execution.")
                 .foregroundStyle(.secondary)
@@ -1541,12 +1654,52 @@ struct HoverDetailsPanel: View {
     }
 }
 
+struct KeyboardHandler: NSViewRepresentable {
+    let model: ScanViewModel
+
+    func makeNSView(context: Context) -> NSView {
+        let view = KeyboardView(model: model)
+        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    class KeyboardView: NSView {
+        let model: ScanViewModel
+        init(model: ScanViewModel) { self.model = model; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError() }
+        override var acceptsFirstResponder: Bool { true }
+
+        override func keyDown(with event: NSEvent) {
+            guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else {
+                super.keyDown(with: event)
+                return
+            }
+            Task { @MainActor in
+                switch event.charactersIgnoringModifiers {
+                case "1": model.viewMode = .files
+                case "2": model.viewMode = .folders
+                case "3": model.viewMode = .tree
+                case "q": model.viewCategoryFilter = .all
+                case "w": model.viewCategoryFilter = .hugeOnly
+                case "e": model.viewCategoryFilter = .garbageOnly
+                case "a": model.toggleRisk(.safe)
+                case "s": model.toggleRisk(.review)
+                case "d": model.toggleRisk(.caution)
+                default: break
+                }
+            }
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var model = ScanViewModel()
     @State private var panelController = ProgressPanelController()
     @State private var showSettings = false
     @State private var showDeleteQueue = false
     @State private var showJournal = false
+    @State private var showAbout = false
 
     var body: some View {
         VStack(spacing: 14) {
@@ -1556,21 +1709,16 @@ struct ContentView: View {
         }
         .padding(16)
         .frame(minWidth: 1160, minHeight: 780)
-        .onKeyPress("1") { model.viewMode = .files; return .handled }
-        .onKeyPress("2") { model.viewMode = .folders; return .handled }
-        .onKeyPress("3") { model.viewMode = .tree; return .handled }
-        .onKeyPress("q") { model.toggleCategory(ScanCategory.allCases[0]); return .handled }
-        .onKeyPress("w") { model.toggleCategory(ScanCategory.allCases[1]); return .handled }
-        .onKeyPress("e") { model.toggleCategory(ScanCategory.allCases[2]); return .handled }
-        .onKeyPress("a") { model.toggleRisk(.safe); return .handled }
-        .onKeyPress("s") { model.toggleRisk(.review); return .handled }
-        .onKeyPress("d") { model.toggleRisk(.caution); return .handled }
+        .background(KeyboardHandler(model: model))
         .onChange(of: model.isScanning) { scanning in
             if scanning {
                 panelController.show(model: model)
             } else {
                 panelController.hide()
             }
+        }
+        .sheet(isPresented: $showAbout) {
+            AboutSheetView { showAbout = false }
         }
         .sheet(isPresented: $showSettings) {
             SettingsSheetView(model: model) { showSettings = false }
@@ -1588,7 +1736,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("DISK AUDIT")
                     .font(.system(size: 24, weight: .bold, design: .rounded))
-                Text("Real treemap + hover explanations + risk labels + cleanup workflow")
+                Text("Disk usage analysis and cleanup tool")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1603,6 +1751,8 @@ struct ContentView: View {
             Spacer()
 
             HStack(spacing: 8) {
+                Button("About") { showAbout = true }
+                    .buttonStyle(.bordered)
                 Button("Settings") { showSettings = true }
                     .buttonStyle(.bordered)
 
@@ -1695,6 +1845,14 @@ struct ContentView: View {
             Text("Filters")
                 .font(.headline)
 
+            HStack {
+                Text("View Mode")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("(1), (2), (3)")
+                    .font(.caption)
+                    .foregroundStyle(.gray)
+            }
             Picker("View", selection: $model.viewMode) {
                 ForEach(TreemapViewMode.allCases) { mode in
                     Text(mode.rawValue).tag(mode)
@@ -1702,6 +1860,14 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
+            HStack {
+                Text("Category Filter")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("(Q), (W), (E)")
+                    .font(.caption)
+                    .foregroundStyle(.gray)
+            }
             Picker("View Category", selection: $model.viewCategoryFilter) {
                 ForEach(ViewCategoryFilter.allCases) { filter in
                     Text(filter.rawValue).tag(filter)
@@ -1711,14 +1877,21 @@ struct ContentView: View {
             .disabled(model.viewMode == .tree)
 
             if model.viewMode != .tree {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Risk Level")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text("(A), (S), (D)")
+                                .font(.caption)
+                                .foregroundStyle(.gray)
+                        }
+                    }
+                    Spacer()
                     ForEach(RiskLevel.allCases) { risk in
                         Button {
-                            if model.selectedRisks.contains(risk) {
-                                model.selectedRisks.remove(risk)
-                            } else {
-                                model.selectedRisks.insert(risk)
-                            }
+                            model.toggleRisk(risk)
                         } label: {
                             Text(risk.label)
                                 .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -1736,23 +1909,25 @@ struct ContentView: View {
                         .help(risk.hint)
                     }
                 }
-
-                Button(model.selectedRisks.count == RiskLevel.allCases.count ? "Deselect All Risks" : "Select All Risks") {
-                    model.toggleAllRiskFilters()
-                }
-                .buttonStyle(.bordered)
             }
 
             if model.viewMode == .files || model.viewMode == .tree || model.viewMode == .folders {
                 let label = model.viewMode == .folders ? "Folder Type Filter" : "File Type Filter"
                 let preview = model.viewMode == .folders ? model.folderCategorySizePreview : model.fileCategorySizePreview
                 HStack {
-                    Text(label)
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Button("Select All") { model.selectAllCategories() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(label)
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Button("Select All") { model.selectAllCategories() }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                        Text("CMD + Left Mouse for exclusive selection")
+                            .font(.caption2)
+                            .foregroundStyle(.gray)
+                    }
                 }
 
                 ScrollView {
@@ -1778,8 +1953,6 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxHeight: 210)
-            }
-
             }
 
             Divider()
