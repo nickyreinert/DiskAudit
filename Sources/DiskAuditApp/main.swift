@@ -274,7 +274,8 @@ final class ScanViewModel: ObservableObject {
     @Published var deleteQueue: [AuditItem] = []
     @Published var cleanupJournal: [CleanupJournalEntry] = []
     @Published var statusMessage: String = ""
-    @Published var hoveredItem: AuditItem?
+    // NOTE: hoveredItem is intentionally NOT @Published here — it lives as @State in ContentView
+    // so that hovering does not trigger recomputation of filteredItems / groupedByExtension etc.
     @Published var treeRoots: [PathTreeNode] = []
     @Published var lastScanTimestamp: Date?
     @Published var currentScanningPath: String = ""
@@ -282,13 +283,31 @@ final class ScanViewModel: ObservableObject {
     @Published var currentDrillDownExtension: String? = nil
     @Published var currentDrillDownFolderName: String? = nil
     @Published var currentTreeDrillPath: String? = nil
-    @Published var watchList: [WatchedItem] = []
+    @Published var watchList: [WatchedItem] = [] {
+        didSet { rebuildWatchLookup() }
+    }
     @Published var watchListFilterEnabled: Bool = false
     @Published var scanHistory: [ScanHistoryEntry] = []
-    @Published var ignoreRules: [IgnoreRule] = []
+    @Published var ignoreRules: [IgnoreRule] = [] {
+        didSet { rebuildIgnoreLookup() }
+    }
     /// Aggregated size+count for files that were below the minSizeMB threshold.
     /// Keyed by file extension (lowercased). Feeds into groupedByExtension.
     @Published var smallFilesByExtension: [String: (size: Int64, count: Int)] = [:]
+
+    // MARK: - Pre-computed O(1) lookup structures (rebuilt when rules/watchlist change)
+    /// Exact paths to ignore
+    private(set) var ignoredPathSet: Set<String> = []
+    /// Extensions to ignore (lowercased, no dot)
+    private(set) var ignoredExtSet: Set<String> = []
+    /// Folder name components to ignore
+    private(set) var ignoredFolderNameSet: Set<String> = []
+    /// Exact file/folder paths in watchlist
+    private(set) var watchedPathSet: Set<String> = []
+    /// Extensions in watchlist (lowercased)
+    private(set) var watchedExtSet: Set<String> = []
+    /// Folder names in watchlist
+    private(set) var watchedFolderNameSet: Set<String> = []
 
     private var scanTask: Task<Void, Never>?
     private var scanStartTime: Date?
@@ -304,6 +323,9 @@ final class ScanViewModel: ObservableObject {
     private var foldersForNameCacheKey: String = ""
     private var foldersForNameCacheName: String = ""
     private var foldersForNameCacheItems: [AuditItem] = []
+    // filteredItems cache
+    private var filteredItemsCacheKey: String = ""
+    private var filteredItemsCacheResult: [AuditItem] = []
 
     init() {
         scanLocations = Self.defaultLocations()
@@ -312,6 +334,8 @@ final class ScanViewModel: ObservableObject {
         loadWatchList()
         loadScanHistory()
         loadIgnoreRules()
+        rebuildIgnoreLookup()
+        rebuildWatchLookup()
     }
 
     func clearScanResults() {
@@ -319,7 +343,6 @@ final class ScanViewModel: ObservableObject {
         folders = []
         treeRoots = []
         lastScanTimestamp = nil
-        hoveredItem = nil
         currentDrillDownExtension = nil
         currentDrillDownFolderName = nil
         currentTreeDrillPath = nil
@@ -349,7 +372,6 @@ final class ScanViewModel: ObservableObject {
         statusMessage = ""
         files = []
         folders = []
-        hoveredItem = nil
         currentDrillDownExtension = nil
         currentDrillDownFolderName = nil
         currentTreeDrillPath = nil
@@ -378,7 +400,7 @@ final class ScanViewModel: ObservableObject {
         let minBytes = Int64(minSizeMB) * 1_048_576
 
         scanTask = Task(priority: .userInitiated) {
-            let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
+            let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey, .volumeIsLocalKey]
             // Use hash-based dedup: 8 bytes/entry vs ~80 bytes for full path strings
             var seenPathHashes = Set<Int>()
             var scannedCount = 0
@@ -416,7 +438,16 @@ final class ScanViewModel: ObservableObject {
 
                     do {
                         let values = try fileURL.resourceValues(forKeys: Set(resourceKeys))
-                        if values.isSymbolicLink == true { continue }
+                        // Skip symlinks entirely (both file and directory symlinks)
+                        if values.isSymbolicLink == true {
+                            enumerator.skipDescendants()
+                            continue
+                        }
+                        // Skip non-local volumes (network mounts, virtual FS, etc.)
+                        if values.volumeIsLocal == false {
+                            enumerator.skipDescendants()
+                            continue
+                        }
                         guard values.isRegularFile == true else { continue }
                     } catch { continue }
 
@@ -533,6 +564,23 @@ final class ScanViewModel: ObservableObject {
 
     // MARK: - Ignore Rules helpers
 
+    private func rebuildIgnoreLookup() {
+        ignoredPathSet = Set(ignoreRules.filter { $0.kind == .path }.map { $0.identifier })
+        ignoredExtSet  = Set(ignoreRules.filter { $0.kind == .fileExtension }.map { $0.identifier.lowercased() })
+        ignoredFolderNameSet = Set(ignoreRules.filter { $0.kind == .folderName }.map { $0.identifier })
+        // Invalidate all downstream caches
+        filteredItemsCacheKey = ""
+        groupedByExtensionCacheKey = ""
+        groupedByFolderNameCacheKey = ""
+    }
+
+    func rebuildWatchLookup() {
+        watchedPathSet = Set(watchList.filter { $0.kind == .file || $0.kind == .folder }.map { $0.identifier })
+        watchedExtSet  = Set(watchList.filter { $0.kind == .fileExtension }.map { $0.identifier.lowercased() })
+        watchedFolderNameSet = Set(watchList.filter { $0.kind == .folderName }.map { $0.identifier })
+        filteredItemsCacheKey = ""
+    }
+
     func addIgnoreRule(_ rule: IgnoreRule) {
         guard !ignoreRules.contains(where: { $0.kind == rule.kind && $0.identifier == rule.identifier }) else { return }
         ignoreRules.append(rule)
@@ -545,18 +593,25 @@ final class ScanViewModel: ObservableObject {
     }
 
     /// Returns true if a file path should be suppressed (scan + render)
+    /// O(1) ignore check using pre-built sets
     func isIgnoredPath(_ path: String) -> Bool {
-        for rule in ignoreRules {
-            switch rule.kind {
-            case .path:
-                if path == rule.identifier || path.hasPrefix(rule.identifier + "/") { return true }
-            case .fileExtension:
-                let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
-                if ext == rule.identifier.lowercased() { return true }
-            case .folderName:
-                // suppress any folder (or file inside a folder) whose last component matches
-                let parts = path.split(separator: "/")
-                if parts.contains(Substring(rule.identifier)) { return true }
+        // Exact path match
+        if ignoredPathSet.contains(path) { return true }
+        // Prefix match for ignored paths (parent folder)
+        for p in ignoredPathSet where path.hasPrefix(p + "/") { return true }
+        // Extension match (O(1))
+        if !ignoredExtSet.isEmpty {
+            let ext = (path as NSString).pathExtension.lowercased()
+            if ignoredExtSet.contains(ext) { return true }
+        }
+        // Folder name match: any component in the path
+        if !ignoredFolderNameSet.isEmpty {
+            // Fast: check each ignored name as a substring first, then confirm component
+            for name in ignoredFolderNameSet {
+                if path.contains(name) {
+                    // confirm it's actually a path component
+                    if path.contains("/" + name + "/") || path.hasSuffix("/" + name) { return true }
+                }
             }
         }
         return false
@@ -717,6 +772,9 @@ final class ScanViewModel: ObservableObject {
     }
 
     var filteredItems: [AuditItem] {
+        let key = filteredItemsCacheKeyValue()
+        if key == filteredItemsCacheKey { return filteredItemsCacheResult }
+
         let source: [AuditItem]
         switch viewMode {
         case .files, .fileTypes:
@@ -724,7 +782,11 @@ final class ScanViewModel: ObservableObject {
         case .folders, .folderTypes, .tree:
             source = folders
         }
-        guard !selectedCategories.isEmpty, !selectedRisks.isEmpty else { return [] }
+        guard !selectedCategories.isEmpty, !selectedRisks.isEmpty else {
+            filteredItemsCacheKey = key
+            filteredItemsCacheResult = []
+            return []
+        }
         var result = source.filter { item in
             let riskPass = selectedRisks.contains(item.risk)
             let categoryPass = selectedCategories.contains(item.category)
@@ -738,8 +800,7 @@ final class ScanViewModel: ObservableObject {
         // watched extensions whose files are all below the size threshold (small files).
         if watchListFilterEnabled && (viewMode == .files || viewMode == .fileTypes) {
             let coveredExts = Set(result.map { $0.url.pathExtension.lowercased() })
-            for w in watchList where w.kind == .fileExtension {
-                let ext = w.identifier.lowercased()
+            for ext in watchedExtSet {
                 guard !coveredExts.contains(ext),
                       let data = smallFilesByExtension[ext], data.size > 0 else { continue }
                 let cat = categoryForExtension(ext)
@@ -755,7 +816,17 @@ final class ScanViewModel: ObservableObject {
             }
         }
 
+        filteredItemsCacheKey = key
+        filteredItemsCacheResult = result
         return result
+    }
+
+    private func filteredItemsCacheKeyValue() -> String {
+        let cats = selectedCategories.map(\.rawValue).sorted().joined(separator: "|")
+        let risks = selectedRisks.map(\.rawValue).sorted().joined(separator: "|")
+        let ignKey = ignoredPathSet.count + ignoredExtSet.count * 1000 + ignoredFolderNameSet.count * 1_000_000
+        let watchKey = watchListFilterEnabled ? "w\(watchedPathSet.count)\(watchedExtSet.count)\(watchedFolderNameSet.count)" : "w0"
+        return "\(viewMode.rawValue)#\(files.count)#\(folders.count)#\(cats)#\(risks)#\(viewCategoryFilter.rawValue)#\(minSizeMB)#\(ignKey)#\(watchKey)"
     }
 
     var groupedByExtension: [AuditItem] {
@@ -1127,15 +1198,13 @@ final class ScanViewModel: ObservableObject {
     }
 
     private func fileSize(for url: URL) -> Int64? {
-        do {
-            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-            if let n = attrs[.size] as? NSNumber {
-                return n.int64Value
-            }
-        } catch {
-            return nil
-        }
-        return nil
+        // Use lstat so we measure the symlink itself, not its target.
+        // (Though we skip symlinks before calling this, belt-and-suspenders.)
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else { return nil }
+        // Only return a size for regular files
+        guard (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return Int64(st.st_size)
     }
 
     private func accumulateAncestors(of fileURL: URL, size: Int64, roots: [URL], store: inout [String: Int64]) {
@@ -1301,10 +1370,6 @@ final class ScanViewModel: ObservableObject {
         }
         deleteQueue.removeAll { item in
             deletedSet.contains(where: { item.url.path == $0 || item.url.path.hasPrefix($0 + "/") })
-        }
-        if let hovered = hoveredItem,
-           deletedSet.contains(where: { hovered.url.path == $0 || hovered.url.path.hasPrefix($0 + "/") }) {
-            hoveredItem = nil
         }
     }
 
@@ -1539,26 +1604,18 @@ final class ScanViewModel: ObservableObject {
         saveWatchList()
     }
 
+    /// O(1) watch check using pre-built sets
     func isWatched(_ item: AuditItem) -> Bool {
-        for w in watchList {
-            switch w.kind {
-            case .file:
-                // exact file path
-                if item.kind == .file && item.url.path == w.identifier { return true }
-            case .folder:
-                // exact folder, OR any file that lives inside this folder
-                if item.kind == .folder && item.url.path == w.identifier { return true }
-                if item.kind == .file  && item.url.path.hasPrefix(w.identifier + "/") { return true }
-            case .fileExtension:
-                // all files whose extension matches
-                if item.kind == .file {
-                    let ext = item.url.pathExtension.lowercased()
-                    if ext == w.identifier.lowercased() { return true }
-                }
-            case .folderName:
-                // all folders whose last path component matches
-                if item.kind == .folder && item.url.lastPathComponent == w.identifier { return true }
-            }
+        let path = item.url.path
+        if item.kind == .file {
+            if watchedPathSet.contains(path) { return true }
+            // file inside a watched folder?
+            for wp in watchedPathSet where path.hasPrefix(wp + "/") { return true }
+            let ext = item.url.pathExtension.lowercased()
+            if watchedExtSet.contains(ext) { return true }
+        } else {
+            if watchedPathSet.contains(path) { return true }
+            if watchedFolderNameSet.contains(item.url.lastPathComponent) { return true }
         }
         return false
     }
@@ -1720,6 +1777,8 @@ struct ContentView: View {
     @State private var showJournal = false
     @State private var showHistory = false
     @State private var showWatchList = false
+    /// Hover state is local — does NOT trigger ScanViewModel recomputation
+    @State private var hoveredItem: AuditItem?
 
     var body: some View {
         VStack(spacing: 14) {
@@ -1854,7 +1913,8 @@ struct ContentView: View {
                                 onUnqueue: { model.unqueueTreeNode($0) },
                                 isQueued: { model.isTreeNodeQueued($0) },
                                 onWatch: { model.watchTreeNode($0) },
-                                isWatched: { model.isTreeNodeWatched($0) }
+                                isWatched: { model.isTreeNodeWatched($0) },
+                                onIgnore: { model.ignoreTreeNode($0) }
                             )
                         }
                         .background(Color(red: 0.94, green: 0.94, blue: 0.92))
@@ -1907,7 +1967,7 @@ struct ContentView: View {
                         onTap: { model.openInFinder($0) },
                         onQueue: { model.queue($0) },
                         onUnqueue: { model.unqueue($0) },
-                        onHoverChanged: { model.hoveredItem = $0 },
+                        onHoverChanged: { hoveredItem = $0 },
                         onDrillDown: { model.drillDown($0) },
                         isDrillDownable: { model.isDrillDownable($0) },
                         isWatched: { model.isWatched($0) },
@@ -1920,6 +1980,7 @@ struct ContentView: View {
                                 model.watch(item)
                             }
                         },
+                        onIgnore: { model.ignoreItem($0) },
                         extraSizeLabel: {
                             if model.viewMode == .fileTypes && model.currentDrillDownExtension == nil {
                                 return "\(model.groupedFileCount(for: $0)) files"
@@ -2102,7 +2163,7 @@ struct ContentView: View {
 
             Text("Details")
                 .font(.headline)
-            HoverDetailsPanel(item: model.hoveredItem)
+            HoverDetailsPanel(item: hoveredItem)
         }
         .frame(minWidth: 360, maxWidth: 360, maxHeight: .infinity, alignment: .topLeading)
         .padding(10)

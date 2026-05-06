@@ -71,6 +71,7 @@ struct TreemapTile: View {
     let isDrillDownable: Bool
     let isWatched: Bool
     let onWatch: () -> Void
+    let onIgnore: () -> Void
     let extraSizeLabel: String?
 
     var body: some View {
@@ -154,6 +155,9 @@ struct TreemapTile: View {
             Button(action: onWatch) {
                 Label(isWatched ? "Unwatch" : "Watch", systemImage: isWatched ? "eye.slash" : "eye")
             }
+            Button(action: onIgnore) {
+                Label("Ignore", systemImage: "nosign")
+            }
             Divider()
             Button("Left Click: Drill Down") {}
                 .disabled(true)
@@ -176,6 +180,7 @@ struct TreemapCanvas: View {
     let isDrillDownable: (AuditItem) -> Bool
     let isWatched: (AuditItem) -> Bool
     let onWatch: (AuditItem) -> Void
+    let onIgnore: (AuditItem) -> Void
     let extraSizeLabel: (AuditItem) -> String?
 
     var body: some View {
@@ -199,6 +204,7 @@ struct TreemapCanvas: View {
                         isDrillDownable: isDrillDownable(entry.item),
                         isWatched: isWatched(entry.item),
                         onWatch: { onWatch(entry.item) },
+                        onIgnore: { onIgnore(entry.item) },
                         extraSizeLabel: extraSizeLabel(entry.item)
                     )
                     .position(x: entry.rect.midX, y: entry.rect.midY)
@@ -280,6 +286,7 @@ struct PathTreeRowView: View {
     let isQueued: Bool
     let onWatch: (PathTreeNode) -> Void
     let isWatched: Bool
+    let onIgnore: (PathTreeNode) -> Void
 
     private var barRatio: CGFloat {
         guard levelMaxSize > 0 else { return 0 }
@@ -383,6 +390,7 @@ struct PathTreeRowView: View {
                     Button("Drill Down") { onDrillDown(node) }
                         .disabled(node.children.isEmpty)
                     Button(isWatched ? "Unwatch" : "Watch") { onWatch(node) }
+                    Button("Ignore") { onIgnore(node) }
                     Divider()
                     Button("Left Click: Drill Down") {}.disabled(true)
                     Button("CTRL+Click: Add To Delete Queue") {}.disabled(true)
@@ -405,7 +413,8 @@ struct PathTreeRowView: View {
                         onUnqueue: onUnqueue,
                         isQueued: isQueued,
                         onWatch: onWatch,
-                        isWatched: isWatched
+                        isWatched: isWatched,
+                        onIgnore: onIgnore
                     )
                 }
             }
@@ -422,6 +431,7 @@ struct PathTreeView: View {
     let isQueued: (PathTreeNode) -> Bool
     let onWatch: (PathTreeNode) -> Void
     let isWatched: (PathTreeNode) -> Bool
+    let onIgnore: (PathTreeNode) -> Void
 
     private var rootMaxSize: Int64 {
         max(roots.map(\.totalSize).max() ?? 0, 1)
@@ -441,7 +451,8 @@ struct PathTreeView: View {
                         onUnqueue: onUnqueue,
                         isQueued: isQueued(root),
                         onWatch: onWatch,
-                        isWatched: isWatched(root)
+                        isWatched: isWatched(root),
+                        onIgnore: onIgnore
                     )
                     Divider()
                 }
@@ -454,14 +465,20 @@ struct PathTreeView: View {
 struct SettingsSheetView: View {
     @ObservedObject var model: ScanViewModel
     let onClose: () -> Void
+
+    enum SettingsTab: String, CaseIterable {
+        case scan      = "Scan Locations"
+        case exclude   = "Excluded Paths"
+        case ignore    = "Ignore Rules"
+    }
+
+    @State private var selectedTab: SettingsTab = .scan
     @State private var showGarbagePaths = false
     @State private var newExcludePath = ""
 
     private let systemGarbagePaths = [
-        "/private/var/tmp",
-        "/private/var/log",
-        "/Library/Caches",
-        "/Library/Logs",
+        "/private/var/tmp", "/private/var/log",
+        "/Library/Caches", "/Library/Logs",
         "/System/Volumes/Data/private/var/tmp",
         "/System/Volumes/Data/private/var/log",
         "/System/Volumes/Data/Library/Caches",
@@ -471,45 +488,66 @@ struct SettingsSheetView: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Scan Settings")
-                .font(.title3.bold())
+        VStack(spacing: 0) {
+            // header
+            HStack {
+                Text("Settings")
+                    .font(.title2.bold())
+                Spacer()
+                Picker("", selection: $selectedTab) {
+                    ForEach(SettingsTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 380)
+                Button("Done") { onClose() }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding([.horizontal, .top], 16)
+            .padding(.bottom, 10)
 
+            Divider()
+
+            ScrollView {
+                switch selectedTab {
+                case .scan:    scanTab
+                case .exclude: excludeTab
+                case .ignore:  ignoreTab
+                }
+            }
+            .padding(16)
+        }
+        .frame(width: 700, height: 580)
+    }
+
+    // ── Scan Locations tab ──────────────────────────────────
+    @ViewBuilder private var scanTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
             GroupBox {
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle(isOn: $model.includeFullDiskGarbageDeepScan) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Full Disk Scan")
                                 .font(.headline)
-                            Text("Scans everything starting from /. Very slow, but finds all large files and garbage across the entire disk. All custom location settings below are ignored.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text("Scans everything from /. Very slow but finds all large files and garbage. Custom locations below are ignored.")
+                                .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
                 .padding(4)
             } label: {
-                Label("Scan Mode", systemImage: "scope")
-                    .font(.subheadline.weight(.semibold))
+                Label("Scan Mode", systemImage: "scope").font(.subheadline.weight(.semibold))
             }
 
-            if model.includeFullDiskGarbageDeepScan {
-                Text("Full disk scan is active - all location and garbage root settings are locked.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-            } else {
+            if !model.includeFullDiskGarbageDeepScan {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Text("Choose which folders to scan for large files.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text("Which folders to scan for large files.")
+                                .font(.caption).foregroundStyle(.secondary)
                             Spacer()
                             Button("Select All") { model.setAllLocations(enabled: true) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
+                                .buttonStyle(.bordered).controlSize(.small)
                         }
                         List {
                             ForEach(model.scanLocations) { location in
@@ -519,19 +557,16 @@ struct SettingsSheetView: View {
                                 )) {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(location.title)
-                                        Text(location.url.path)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                        Text(location.url.path).font(.caption).foregroundStyle(.secondary)
                                     }
                                 }
                             }
                         }
-                        .frame(minHeight: 200)
+                        .frame(minHeight: 180)
                     }
                     .padding(4)
                 } label: {
-                    Label("Your Locations", systemImage: "folder")
-                        .font(.subheadline.weight(.semibold))
+                    Label("Your Locations", systemImage: "folder").font(.subheadline.weight(.semibold))
                 }
 
                 GroupBox {
@@ -539,104 +574,141 @@ struct SettingsSheetView: View {
                         Toggle(isOn: $model.includeSystemGarbageScan) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("Include system garbage locations")
-                                Text("Also scans common system temp, cache, and log folders for garbage candidates (zero-byte files, partials, old logs, etc.).")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                Text("Also scans temp, cache, and log folders for garbage candidates.")
+                                    .font(.caption).foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
-
                         if model.includeSystemGarbageScan {
                             DisclosureGroup(isExpanded: $showGarbagePaths) {
                                 VStack(alignment: .leading, spacing: 3) {
                                     ForEach(systemGarbagePaths, id: \.self) { path in
                                         if FileManager.default.fileExists(atPath: path) {
-                                            Text(path)
-                                                .font(.system(.caption2, design: .monospaced))
-                                                .foregroundStyle(.secondary)
+                                            Text(path).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
                                         }
                                     }
                                 }
                                 .padding(.top, 4)
                             } label: {
-                                Text("Show scanned system paths")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                Text("Show scanned system paths").font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
                     .padding(4)
                 } label: {
-                    Label("System Garbage Roots", systemImage: "trash")
-                        .font(.subheadline.weight(.semibold))
+                    Label("System Garbage Roots", systemImage: "trash").font(.subheadline.weight(.semibold))
                 }
-            }
-
-            GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Skip specific folders during scan. Useful for network drives, external backups, or known huge unimportant directories.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    HStack(spacing: 4) {
-                        TextField("Enter path to exclude...", text: $newExcludePath)
-                            .textFieldStyle(.roundedBorder)
-                        Button("Add") {
-                            let trimmed = newExcludePath.trimmingCharacters(in: .whitespaces)
-                            if !trimmed.isEmpty && !model.excludedPaths.contains(trimmed) {
-                                model.excludedPaths.append(trimmed)
-                                newExcludePath = ""
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(newExcludePath.trimmingCharacters(in: .whitespaces).isEmpty)
-                    }
-
-                    if !model.excludedPaths.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(model.excludedPaths, id: \.self) { path in
-                                HStack {
-                                    Text(path)
-                                        .font(.caption2)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                    Spacer()
-                                    Button(action: {
-                                        model.excludedPaths.removeAll { $0 == path }
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                .padding(4)
-                                .background(Color.secondary.opacity(0.08))
-                                .cornerRadius(4)
-                            }
-                        }
-                    } else {
-                        Text("No paths excluded (full scan enabled)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .italic()
-                    }
-                }
-                .padding(4)
-            } label: {
-                Label("Exclude Paths", systemImage: "xmark.bin.fill")
-                    .font(.subheadline.weight(.semibold))
-            }
-
-            Spacer()
-            HStack {
-                Spacer()
-                Button("Done") { onClose() }
-                    .buttonStyle(.borderedProminent)
+            } else {
+                Text("Full disk scan active — location settings locked.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 4)
             }
         }
-        .padding(16)
-        .frame(width: 690, height: 680)
+    }
+
+    // ── Excluded Paths tab ──────────────────────────────────
+    @ViewBuilder private var excludeTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Skip specific folders during scan. Useful for network drives, external backups, or known huge unimportant directories.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            HStack(spacing: 4) {
+                TextField("Enter path to exclude...", text: $newExcludePath)
+                    .textFieldStyle(.roundedBorder)
+                Button("Add") {
+                    let trimmed = newExcludePath.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty && !model.excludedPaths.contains(trimmed) {
+                        model.excludedPaths.append(trimmed)
+                        newExcludePath = ""
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(newExcludePath.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+
+            if model.excludedPaths.isEmpty {
+                Text("No paths excluded.").font(.caption).foregroundStyle(.secondary).italic()
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.excludedPaths, id: \.self) { path in
+                        HStack {
+                            Text(path).font(.caption2).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button(action: { model.excludedPaths.removeAll { $0 == path } }) {
+                                Image(systemName: "xmark.circle.fill").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(6)
+                        .background(Color.secondary.opacity(0.08))
+                        .cornerRadius(6)
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Ignore Rules tab ───────────────────────────────────
+    @ViewBuilder private var ignoreTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Ignored items are skipped during scanning and hidden from all views.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Right-click any tile or row and choose \"Ignore\" to add rules quickly.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !model.ignoreRules.isEmpty {
+                    Button("Clear All") {
+                        model.ignoreRules.removeAll()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .foregroundStyle(.red)
+                }
+            }
+
+            if model.ignoreRules.isEmpty {
+                Text("No ignore rules yet.").font(.caption).foregroundStyle(.secondary).italic()
+                    .frame(maxWidth: .infinity, alignment: .center).padding(.top, 20)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.ignoreRules) { rule in
+                        HStack(spacing: 8) {
+                            // kind badge
+                            Text(rule.kind.rawValue)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(badgeColor(rule.kind).opacity(0.15))
+                                .foregroundStyle(badgeColor(rule.kind))
+                                .clipShape(Capsule())
+                            Text(rule.displayLabel)
+                                .font(.caption2.monospaced())
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Text(rule.addedDate.formatted(date: .abbreviated, time: .omitted))
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            Button(action: { model.removeIgnoreRule(rule) }) {
+                                Image(systemName: "xmark.circle.fill").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(7)
+                        .background(Color.secondary.opacity(0.07))
+                        .cornerRadius(7)
+                    }
+                }
+            }
+        }
+    }
+
+    private func badgeColor(_ kind: IgnoreRuleKind) -> Color {
+        switch kind {
+        case .path:          return .blue
+        case .fileExtension: return .purple
+        case .folderName:    return .orange
+        }
     }
 }
 
