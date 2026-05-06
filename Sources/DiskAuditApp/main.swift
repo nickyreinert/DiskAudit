@@ -141,6 +141,7 @@ enum TreemapViewMode: String, CaseIterable, Identifiable {
     case files = "Files"
     case fileTypes = "File Types"
     case folders = "Folders"
+    case folderTypes = "Folder Types"
     case tree = "Tree"
 
     var id: String { rawValue }
@@ -193,6 +194,7 @@ final class ScanViewModel: ObservableObject {
     @Published var currentScanningPath: String = ""
     @Published var excludedPaths: [String] = []
     @Published var currentDrillDownExtension: String? = nil
+    @Published var currentDrillDownFolderName: String? = nil
     @Published var currentTreeDrillPath: String? = nil
 
     private var scanTask: Task<Void, Never>?
@@ -202,6 +204,12 @@ final class ScanViewModel: ObservableObject {
     private var filesForExtensionCacheKey: String = ""
     private var filesForExtensionCacheExt: String = ""
     private var filesForExtensionCacheItems: [AuditItem] = []
+    private var groupedByFolderNameCacheKey: String = ""
+    private var groupedByFolderNameCacheItems: [AuditItem] = []
+    private var groupedByFolderNameCacheCounts: [String: Int] = [:]
+    private var foldersForNameCacheKey: String = ""
+    private var foldersForNameCacheName: String = ""
+    private var foldersForNameCacheItems: [AuditItem] = []
 
     init() {
         scanLocations = Self.defaultLocations()
@@ -216,6 +224,7 @@ final class ScanViewModel: ObservableObject {
         lastScanTimestamp = nil
         hoveredItem = nil
         currentDrillDownExtension = nil
+        currentDrillDownFolderName = nil
         currentTreeDrillPath = nil
         statusMessage = "Scan results cleared."
         deleteScanResultsFile()
@@ -242,6 +251,7 @@ final class ScanViewModel: ObservableObject {
         folders = []
         hoveredItem = nil
         currentDrillDownExtension = nil
+        currentDrillDownFolderName = nil
         currentTreeDrillPath = nil
 
         scanTask = Task(priority: .userInitiated) {
@@ -476,7 +486,7 @@ final class ScanViewModel: ObservableObject {
         switch viewMode {
         case .files, .fileTypes:
             source = files
-        case .folders, .tree:
+        case .folders, .folderTypes, .tree:
             source = folders
         }
         guard !selectedCategories.isEmpty, !selectedRisks.isEmpty else { return [] }
@@ -545,6 +555,80 @@ final class ScanViewModel: ObservableObject {
         return filesForExtensionCacheItems
     }
 
+    var groupedByFolderName: [AuditItem] {
+        let key = folderTypeFilterCacheKey()
+        if key == groupedByFolderNameCacheKey {
+            return groupedByFolderNameCacheItems
+        }
+
+        let source = filteredFoldersForCurrentFilters()
+        var nameMap: [String: (totalSize: Int64, count: Int)] = [:]
+
+        for item in source {
+            let name = item.url.lastPathComponent
+            let folderName = name.isEmpty ? "[root]" : name
+            if nameMap[folderName] != nil {
+                nameMap[folderName]!.totalSize += item.sizeBytes
+                nameMap[folderName]!.count += 1
+            } else {
+                nameMap[folderName] = (totalSize: item.sizeBytes, count: 1)
+            }
+        }
+
+        groupedByFolderNameCacheCounts = nameMap.reduce(into: [:]) { partialResult, entry in
+            partialResult[entry.key] = entry.value.count
+        }
+
+        groupedByFolderNameCacheItems = nameMap
+            .sorted { $0.value.totalSize > $1.value.totalSize }
+            .map { folderName, data in
+                AuditItem(
+                    url: URL(fileURLWithPath: "/\(folderName)", isDirectory: true),
+                    sizeBytes: data.totalSize,
+                    kind: .folder,
+                    category: .others,
+                    garbageReason: nil,
+                    risk: .review
+                )
+            }
+        groupedByFolderNameCacheKey = key
+        return groupedByFolderNameCacheItems
+    }
+
+    func foldersForName(_ name: String) -> [AuditItem] {
+        let key = folderTypeFilterCacheKey()
+        if key == foldersForNameCacheKey && name == foldersForNameCacheName {
+            return foldersForNameCacheItems
+        }
+        let searchName = name == "[root]" ? "" : name
+        foldersForNameCacheItems = filteredFoldersForCurrentFilters().filter { item in
+            let itemName = item.url.lastPathComponent
+            return (itemName.isEmpty && searchName.isEmpty) || itemName == searchName
+        }
+        foldersForNameCacheKey = key
+        foldersForNameCacheName = name
+        return foldersForNameCacheItems
+    }
+
+    func groupedFolderCount(for item: AuditItem) -> Int {
+        groupedByFolderNameCacheCounts[item.url.lastPathComponent, default: 0]
+    }
+
+    private func folderTypeFilterCacheKey() -> String {
+        let categories = selectedCategories.map(\.rawValue).sorted().joined(separator: "|")
+        let risks = selectedRisks.map(\.rawValue).sorted().joined(separator: "|")
+        return "\(folders.count)#\(categories)#\(risks)#\(viewCategoryFilter.rawValue)#\(minSizeMB)"
+    }
+
+    private func filteredFoldersForCurrentFilters() -> [AuditItem] {
+        guard !selectedCategories.isEmpty, !selectedRisks.isEmpty else { return [] }
+        return folders.filter { item in
+            selectedRisks.contains(item.risk)
+            && selectedCategories.contains(item.category)
+            && matchesViewCategoryFilter(item)
+        }
+    }
+
     func groupedFileCount(for item: AuditItem) -> Int {
         groupedByExtensionCacheCounts[item.url.lastPathComponent, default: 0]
     }
@@ -566,17 +650,20 @@ final class ScanViewModel: ObservableObject {
     
     func drillDown(_ item: AuditItem) {
         if viewMode == .fileTypes && currentDrillDownExtension == nil {
-            let ext = item.url.lastPathComponent
-            currentDrillDownExtension = ext
+            currentDrillDownExtension = item.url.lastPathComponent
+        } else if viewMode == .folderTypes && currentDrillDownFolderName == nil {
+            currentDrillDownFolderName = item.url.lastPathComponent
         }
     }
     
     func backFromDrillDown() {
         currentDrillDownExtension = nil
+        currentDrillDownFolderName = nil
     }
     
     func isDrillDownable(_ item: AuditItem) -> Bool {
-        return viewMode == .fileTypes && currentDrillDownExtension == nil
+        return (viewMode == .fileTypes && currentDrillDownExtension == nil)
+            || (viewMode == .folderTypes && currentDrillDownFolderName == nil)
     }
 
     var currentTreeRoots: [PathTreeNode] {
@@ -696,7 +783,7 @@ final class ScanViewModel: ObservableObject {
         switch viewMode {
         case .files, .fileTypes:
             source = files
-        case .folders, .tree:
+        case .folders, .folderTypes, .tree:
             source = folders
         }
         let filtered = filteredItems
@@ -1324,6 +1411,20 @@ struct ContentView: View {
                             }
                         }
 
+                        if model.viewMode == .folderTypes, let currentName = model.currentDrillDownFolderName {
+                            HStack {
+                                Button("Back") {
+                                    model.backFromDrillDown()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                Text("Folder type drill-down: \(currentName)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                        }
+
                     TreemapCanvas(
                         items: displayedTreemapItems,
                         isQueued: { model.isQueued($0) },
@@ -1336,6 +1437,9 @@ struct ContentView: View {
                         extraSizeLabel: {
                             if model.viewMode == .fileTypes && model.currentDrillDownExtension == nil {
                                 return "\(model.groupedFileCount(for: $0)) files"
+                            }
+                            if model.viewMode == .folderTypes && model.currentDrillDownFolderName == nil {
+                                return "\(model.groupedFolderCount(for: $0)) folders"
                             }
                             return nil
                         }
@@ -1354,6 +1458,12 @@ struct ContentView: View {
             }
             return Array(model.groupedByExtension.prefix(320))
         }
+        if model.viewMode == .folderTypes {
+            if let name = model.currentDrillDownFolderName {
+                return Array(model.foldersForName(name).prefix(320))
+            }
+            return Array(model.groupedByFolderName.prefix(320))
+        }
         return Array(model.filteredItems.prefix(320))
     }
 
@@ -1366,7 +1476,7 @@ struct ContentView: View {
                 Text("View Mode")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text("(1), (2), (3), (4)")
+                Text("(1), (2), (3), (4), (5)")
                     .font(.caption)
                     .foregroundStyle(.gray)
             }
@@ -1437,9 +1547,9 @@ struct ContentView: View {
                 }
             }
 
-            if model.viewMode == .files || model.viewMode == .fileTypes || model.viewMode == .tree || model.viewMode == .folders {
-                let label = model.viewMode == .folders ? "Folder Type Filter" : "File Type Filter"
-                let preview = model.viewMode == .folders ? model.folderCategorySizePreview : model.fileCategorySizePreview
+            if model.viewMode != .tree {
+                let label = (model.viewMode == .folders || model.viewMode == .folderTypes) ? "Folder Type Filter" : "File Type Filter"
+                let preview = (model.viewMode == .folders || model.viewMode == .folderTypes) ? model.folderCategorySizePreview : model.fileCategorySizePreview
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {

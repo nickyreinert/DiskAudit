@@ -83,6 +83,8 @@ struct TreemapTile: View {
                 onQueue()
             } else if isDrillDownable {
                 onDrillDown()
+            } else {
+                onTap()
             }
         }) {
             ZStack(alignment: .topLeading) {
@@ -797,7 +799,8 @@ struct KeyboardHandler: NSViewRepresentable {
                 case "1": model.viewMode = .files
                 case "2": model.viewMode = .fileTypes
                 case "3": model.viewMode = .folders
-                case "4": model.viewMode = .tree
+                case "4": model.viewMode = .folderTypes
+                case "5": model.viewMode = .tree
                 case "q": model.viewCategoryFilter = .all
                 case "w": model.viewCategoryFilter = .hugeOnly
                 case "e": model.viewCategoryFilter = .garbageOnly
