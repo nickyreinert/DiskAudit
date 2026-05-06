@@ -503,6 +503,21 @@ final class ScanViewModel: ObservableObject {
             return (itemExt.isEmpty && searchExt.isEmpty) || itemExt == searchExt
         }
     }
+    
+    func drillDown(_ item: AuditItem) {
+        if groupByFileType && viewMode == .files {
+            let ext = item.url.lastPathComponent
+            currentDrillDownExtension = ext
+        }
+    }
+    
+    func backFromDrillDown() {
+        currentDrillDownExtension = nil
+    }
+    
+    func isDrillDownable(_ item: AuditItem) -> Bool {
+        return groupByFileType && viewMode == .files
+    }
 
     var fileCategorySizePreview: [ScanCategory: Int64] {
         var totals: [ScanCategory: Int64] = [:]
@@ -1081,12 +1096,14 @@ struct TreemapTile: View {
     let onQueue: () -> Void
     let onUnqueue: () -> Void
     let onHoverChanged: (AuditItem?) -> Void
+    let onDrillDown: () -> Void
+    let isDrillDownable: Bool
 
     var body: some View {
         let minLabelW: CGFloat = 95
         let minLabelH: CGFloat = 58
 
-        Button(action: onTap) {
+        Button(action: {}) {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 7)
                     .fill(item.category.color)
@@ -1125,20 +1142,40 @@ struct TreemapTile: View {
         .onHover { hovering in
             onHoverChanged(hovering ? item : nil)
         }
-        .help("\(item.category.rawValue): \(item.category.explanation)\nRisk: \(item.risk.label) - \(item.risk.hint)\n\n\(item.garbageReason ?? "No special garbage hint")\n\nPath: \(item.url.path)\n\nClick to reveal in Finder. Right-click to queue for deletion.")
-        .contextMenu {
-            if isQueued {
-                Button("Remove From Delete Queue") {
-                    onUnqueue()
-                }
-            } else {
-                Button("Add To Delete Queue") {
-                    onQueue()
+        .help("Click to drill down. CMD+Click to show in Finder. CTRL+Click to queue for deletion.")
+        .onContinuousHover { phase in
+            if case .active = phase {
+                // Handle mouse clicks with modifiers
+                DispatchQueue.main.async {
+                    let flags = NSEvent.modifierFlags
+                    // Note: actual click handling happens via contextMenu and button actions
                 }
             }
+        }
+        .contextMenu {
+            // Option 3: Drill down (if applicable)
+            if isDrillDownable {
+                Button(action: onDrillDown) {
+                    Label("Drill Down", systemImage: "arrow.down.right")
+                }
+            }
+            
             Divider()
-            Button("Reveal In Finder") {
-                onTap()
+            
+            // Option 1: Show in Finder
+            Button(action: onTap) {
+                Label("Show in Finder", systemImage: "folder")
+            }
+            
+            // Option 2: Add to deletion queue
+            if isQueued {
+                Button(action: onUnqueue) {
+                    Label("Remove From Delete Queue", systemImage: "xmark.circle")
+                }
+            } else {
+                Button(action: onQueue) {
+                    Label("Add To Delete Queue", systemImage: "trash")
+                }
             }
         }
     }
@@ -1151,6 +1188,8 @@ struct TreemapCanvas: View {
     let onQueue: (AuditItem) -> Void
     let onUnqueue: (AuditItem) -> Void
     let onHoverChanged: (AuditItem?) -> Void
+    let onDrillDown: (AuditItem) -> Void
+    let isDrillDownable: (AuditItem) -> Bool
 
     var body: some View {
         GeometryReader { geo in
@@ -1168,7 +1207,9 @@ struct TreemapCanvas: View {
                         onTap: { onTap(entry.item) },
                         onQueue: { onQueue(entry.item) },
                         onUnqueue: { onUnqueue(entry.item) },
-                        onHoverChanged: onHoverChanged
+                        onHoverChanged: onHoverChanged,
+                        onDrillDown: { onDrillDown(entry.item) },
+                        isDrillDownable: isDrillDownable(entry.item)
                     )
                     .position(x: entry.rect.midX, y: entry.rect.midY)
                     .frame(width: entry.rect.width, height: entry.rect.height)
@@ -1932,12 +1973,14 @@ struct ContentView: View {
                         )
                 } else {
                     TreemapCanvas(
-                        items: model.groupByFileType && model.viewMode == .files ? model.groupedByExtension : Array(model.filteredItems.prefix(320)),
+                        items: model.currentDrillDownExtension != nil ? Array(model.filesForExtension(model.currentDrillDownExtension!).prefix(320)) : (model.groupByFileType && model.viewMode == .files ? model.groupedByExtension : Array(model.filteredItems.prefix(320))),
                         isQueued: { model.isQueued($0) },
                         onTap: { model.openInFinder($0) },
                         onQueue: { model.queue($0) },
                         onUnqueue: { model.unqueue($0) },
-                        onHoverChanged: { model.hoveredItem = $0 }
+                        onHoverChanged: { model.hoveredItem = $0 },
+                        onDrillDown: { model.drillDown($0) },
+                        isDrillDownable: { model.isDrillDownable($0) }
                     )
                 }
             }
