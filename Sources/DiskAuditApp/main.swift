@@ -1470,7 +1470,6 @@ class PathTreeNode: Identifiable {
     let fullPath: String
     var sizeBytes: Int64 = 0
     var children: [PathTreeNode] = []
-    var isExpanded: Bool = false
 
     init(name: String, fullPath: String) {
         self.name = name
@@ -2443,7 +2442,7 @@ struct ContentView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(ScanCategory.allCases.enumerated()), id: \.element) { index, category in
+                        ForEach(ScanCategory.allCases, id: \.self) { category in
                             CategoryFilterChip(
                                 category: category,
                                 selected: model.selectedCategories.contains(category),
