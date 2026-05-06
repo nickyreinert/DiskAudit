@@ -782,6 +782,9 @@ final class ScanViewModel: ObservableObject {
 
         // Merge small files (no AuditItem exists for these, but they count!)
         for (ext, data) in smallFilesByExtension {
+            // skip if this extension is ignored
+            let extIgnored = ignoreRules.contains { $0.kind == .fileExtension && $0.identifier.lowercased() == ext.lowercased() }
+            if extIgnored { continue }
             if extensionMap[ext] != nil {
                 extensionMap[ext]!.totalSize += data.size
                 extensionMap[ext]!.count += data.count
@@ -789,6 +792,10 @@ final class ScanViewModel: ObservableObject {
                 extensionMap[ext] = (totalSize: data.size, count: data.count)
             }
         }
+
+        // Remove ignored extensions from result map
+        let ignoredExts = Set(ignoreRules.filter { $0.kind == .fileExtension }.map { $0.identifier.lowercased() })
+        for ext in ignoredExts { extensionMap.removeValue(forKey: ext) }
 
         groupedByExtensionCacheCounts = extensionMap.reduce(into: [:]) { partialResult, entry in
             partialResult[entry.key] = entry.value.count
@@ -836,10 +843,12 @@ final class ScanViewModel: ObservableObject {
 
         let source = filteredFoldersForCurrentFilters()
         var nameMap: [String: (totalSize: Int64, count: Int)] = [:]
+        let ignoredNames = Set(ignoreRules.filter { $0.kind == .folderName }.map { $0.identifier })
 
         for item in source {
             let name = item.url.lastPathComponent
             let folderName = name.isEmpty ? "[root]" : name
+            if ignoredNames.contains(folderName) { continue }
             if nameMap[folderName] != nil {
                 nameMap[folderName]!.totalSize += item.sizeBytes
                 nameMap[folderName]!.count += 1
