@@ -256,6 +256,10 @@ final class ScanViewModel: ObservableObject {
     @Published var isScanning = false
     @Published var progressValue: Double = 0
     @Published var progressLabel = "Ready"
+    /// True while previous scan results are being loaded from disk at startup
+    @Published var isLoadingPreviousResults = false
+    /// 0.0–1.0 progress while loading previous results
+    @Published var loadingProgress: Double = 0
     @Published var scannedCount: Int = 0
     @Published var scannedSizeBytes: Int64 = 0
     @Published var targetSizeBytes: Int64 = 0
@@ -330,12 +334,15 @@ final class ScanViewModel: ObservableObject {
     init() {
         scanLocations = Self.defaultLocations()
         loadJournal()
-        loadScanResults()
         loadWatchList()
         loadScanHistory()
         loadIgnoreRules()
         rebuildIgnoreLookup()
         rebuildWatchLookup()
+        // Defer heavy scan-results loading so the window can render first
+        Task { @MainActor [weak self] in
+            await self?.loadScanResultsAsync()
+        }
     }
 
     func clearScanResults() {
@@ -1503,12 +1510,14 @@ final class ScanViewModel: ObservableObject {
         }
     }
 
-    private func loadScanResults() {
+    private func loadScanResultsAsync() async {
         guard let fileURL = scanResultsFileURL(),
-              FileManager.default.fileExists(atPath: fileURL.path),
-              let jsonData = try? Data(contentsOf: fileURL) else {
-            return
-        }
+              FileManager.default.fileExists(atPath: fileURL.path) else { return }
+
+        isLoadingPreviousResults = true
+        loadingProgress = 0.05
+        // Yield so the window renders the loading overlay before we start blocking work
+        await Task.yield()
 
         struct SavedAuditItem: Codable {
             let path: String
@@ -1518,59 +1527,83 @@ final class ScanViewModel: ObservableObject {
             let garbageReason: String?
             let risk: String
         }
-
         struct SavedScanData: Codable {
             let timestamp: String
             let files: [SavedAuditItem]
             let folders: [SavedAuditItem]
         }
 
-        do {
-            let decoder = JSONDecoder()
-            let data = try decoder.decode(SavedScanData.self, from: jsonData)
-            let formatter = ISO8601DateFormatter()
-            if let timestamp = formatter.date(from: data.timestamp) {
-                lastScanTimestamp = timestamp
-
-                files = data.files.compactMap { saved in
-                    guard let kind = AuditItemKind(rawValue: saved.kind),
-                          let category = ScanCategory(rawValue: saved.category),
-                          let risk = RiskLevel(rawValue: saved.risk) else {
-                        return nil
-                    }
-                    return AuditItem(
-                        url: URL(fileURLWithPath: saved.path, isDirectory: kind == .folder),
-                        sizeBytes: saved.sizeBytes,
-                        kind: kind,
-                        category: category,
-                        garbageReason: saved.garbageReason,
-                        risk: risk
-                    )
-                }
-
-                folders = data.folders.compactMap { saved in
-                    guard let kind = AuditItemKind(rawValue: saved.kind),
-                          let category = ScanCategory(rawValue: saved.category),
-                          let risk = RiskLevel(rawValue: saved.risk) else {
-                        return nil
-                    }
-                    return AuditItem(
-                        url: URL(fileURLWithPath: saved.path, isDirectory: kind == .folder),
-                        sizeBytes: saved.sizeBytes,
-                        kind: kind,
-                        category: category,
-                        garbageReason: saved.garbageReason,
-                        risk: risk
-                    )
-                }
-
-                treeRoots = PathTreeBuilder.buildTree(from: files + folders)
-                statusMessage = "Loaded previous scan results from \(timestamp.formatted(date: .numeric, time: .standard))"
-            }
-        } catch {
+        // Stage 1: read file from disk
+        guard let jsonData = try? Data(contentsOf: fileURL) else {
+            isLoadingPreviousResults = false
             return
         }
+        loadingProgress = 0.20
+        await Task.yield()
+
+        // Stage 2: JSON decode
+        let decoded: SavedScanData?
+        do {
+            decoded = try JSONDecoder().decode(SavedScanData.self, from: jsonData)
+        } catch {
+            isLoadingPreviousResults = false
+            return
+        }
+        guard let data = decoded,
+              let timestamp = ISO8601DateFormatter().date(from: data.timestamp) else {
+            isLoadingPreviousResults = false
+            return
+        }
+        loadingProgress = 0.45
+        await Task.yield()
+
+        // Stage 3: map files
+        let mappedFiles: [AuditItem] = data.files.compactMap { saved in
+            guard let kind = AuditItemKind(rawValue: saved.kind),
+                  let category = ScanCategory(rawValue: saved.category),
+                  let risk = RiskLevel(rawValue: saved.risk) else { return nil }
+            return AuditItem(
+                url: URL(fileURLWithPath: saved.path, isDirectory: kind == .folder),
+                sizeBytes: saved.sizeBytes, kind: kind, category: category,
+                garbageReason: saved.garbageReason, risk: risk
+            )
+        }
+        loadingProgress = 0.65
+        await Task.yield()
+
+        // Stage 4: map folders
+        let mappedFolders: [AuditItem] = data.folders.compactMap { saved in
+            guard let kind = AuditItemKind(rawValue: saved.kind),
+                  let category = ScanCategory(rawValue: saved.category),
+                  let risk = RiskLevel(rawValue: saved.risk) else { return nil }
+            return AuditItem(
+                url: URL(fileURLWithPath: saved.path, isDirectory: kind == .folder),
+                sizeBytes: saved.sizeBytes, kind: kind, category: category,
+                garbageReason: saved.garbageReason, risk: risk
+            )
+        }
+        loadingProgress = 0.80
+        await Task.yield()
+
+        // Stage 5: build path tree
+        let tree = PathTreeBuilder.buildTree(from: mappedFiles + mappedFolders)
+        loadingProgress = 0.95
+        await Task.yield()
+
+        // Commit to @Published state
+        lastScanTimestamp = timestamp
+        files = mappedFiles
+        folders = mappedFolders
+        treeRoots = tree
+        statusMessage = "Loaded previous scan results from \(timestamp.formatted(date: .numeric, time: .standard))"
+
+        loadingProgress = 1.0
+        isLoadingPreviousResults = false
     }
+
+    // Keep the old synchronous version used when clearing results is not needed —
+    // this stub is kept so any future call sites compile.
+    private func loadScanResults() { /* replaced by loadScanResultsAsync() */ }
 
     private func deleteScanResultsFile() {
         guard let fileURL = scanResultsFileURL() else { return }
@@ -1995,6 +2028,30 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay {
+                if model.isLoadingPreviousResults {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(.ultraThinMaterial)
+                        VStack(spacing: 16) {
+                            Text("Loading previous scan results…")
+                                .font(.headline)
+                            VStack(spacing: 6) {
+                                ProgressView(value: model.loadingProgress)
+                                    .progressViewStyle(.linear)
+                                    .frame(width: 280)
+                                    .tint(.accentColor)
+                                Text("\(Int(model.loadingProgress * 100)) %")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
+                        .padding(32)
+                    }
+                    .transition(.opacity.animation(.easeInOut(duration: 0.25)))
+                }
+            }
         }
     }
 
