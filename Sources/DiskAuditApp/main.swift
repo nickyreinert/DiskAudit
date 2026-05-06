@@ -138,9 +138,10 @@ struct AuditItem: Identifiable, Hashable {
 }
 
 enum TreemapViewMode: String, CaseIterable, Identifiable {
-    case files = "Huge Files"
-    case folders = "Huge Folders"
-    case tree = "Folder Tree"
+    case files = "Files"
+    case fileTypes = "File Types"
+    case folders = "Folders"
+    case tree = "Tree"
 
     var id: String { rawValue }
 }
@@ -178,7 +179,6 @@ final class ScanViewModel: ObservableObject {
     @Published var selectedRisks: Set<RiskLevel> = Set(RiskLevel.allCases)
     @Published var viewMode: TreemapViewMode = .files
     @Published var viewCategoryFilter: ViewCategoryFilter = .all
-    @Published var groupByFileType: Bool = false
 
     @Published var includeSystemGarbageScan = true
     @Published var includeFullDiskGarbageDeepScan = false
@@ -238,8 +238,6 @@ final class ScanViewModel: ObservableObject {
         currentDrillDownExtension = nil
         currentTreeDrillPath = nil
 
-        let thresholdBytes = Int64(max(1, minSizeMB)) * 1024 * 1024
-
         scanTask = Task(priority: .userInitiated) {
             let allFiles = self.collectAllRegularFiles(in: allRoots)
             let total = max(1, allFiles.count)
@@ -259,7 +257,7 @@ final class ScanViewModel: ObservableObject {
                 let insideHeavyRoot = heavyRoots.contains { path.hasPrefix($0.path) }
                 let insideGarbageRoot = garbageRoots.contains { path.hasPrefix($0.path) }
 
-                let includeHeavy = insideHeavyRoot && size >= thresholdBytes
+                let includeHeavy = insideHeavyRoot
                 let includeGarbage = garbageReason != nil && insideGarbageRoot
 
                 if includeHeavy || includeGarbage {
@@ -296,7 +294,7 @@ final class ScanViewModel: ObservableObject {
             var folderItems: [AuditItem] = []
             for (path, size) in folderAccumulator {
                 let garbageHits = folderGarbageCount[path, default: 0]
-                if size >= thresholdBytes || garbageHits >= 20 {
+                if size > 0 || garbageHits >= 20 {
                     let folderURL = URL(fileURLWithPath: path, isDirectory: true)
                     let cat = self.classify(path: path, isFolder: true)
                     let reason = garbageHits >= 20 ? "Contains \(garbageHits) garbage-candidate files" : nil
@@ -318,8 +316,8 @@ final class ScanViewModel: ObservableObject {
             folderItems.sort { $0.sizeBytes > $1.sizeBytes }
 
             await MainActor.run {
-                self.files = Array(heavyOrGarbageFiles.prefix(1200))
-                self.folders = Array(folderItems.prefix(1200))
+                self.files = heavyOrGarbageFiles
+                self.folders = folderItems
                 self.treeRoots = PathTreeBuilder.buildTree(from: self.files + self.folders)
                 self.lastScanTimestamp = Date()
                 self.isScanning = false
@@ -462,7 +460,13 @@ final class ScanViewModel: ObservableObject {
     }
 
     var filteredItems: [AuditItem] {
-        let source = viewMode == .files ? files : folders
+        let source: [AuditItem]
+        switch viewMode {
+        case .files, .fileTypes:
+            source = files
+        case .folders, .tree:
+            source = folders
+        }
         guard !selectedCategories.isEmpty, !selectedRisks.isEmpty else { return [] }
         return source.filter { item in
             let riskPass = selectedRisks.contains(item.risk)
@@ -473,7 +477,7 @@ final class ScanViewModel: ObservableObject {
     }
 
     var groupedByExtension: [AuditItem] {
-        guard viewMode == .files && groupByFileType else { return filteredItems }
+        guard viewMode == .fileTypes else { return filteredItems }
         
         var extensionMap: [String: (extension: String, totalSize: Int64, count: Int)] = [:]
         
@@ -509,7 +513,7 @@ final class ScanViewModel: ObservableObject {
     }
     
     func drillDown(_ item: AuditItem) {
-        if groupByFileType && viewMode == .files {
+        if viewMode == .fileTypes && currentDrillDownExtension == nil {
             let ext = item.url.lastPathComponent
             currentDrillDownExtension = ext
         }
@@ -520,7 +524,7 @@ final class ScanViewModel: ObservableObject {
     }
     
     func isDrillDownable(_ item: AuditItem) -> Bool {
-        return groupByFileType && viewMode == .files
+        return viewMode == .fileTypes && currentDrillDownExtension == nil
     }
 
     var currentTreeRoots: [PathTreeNode] {
@@ -636,7 +640,13 @@ final class ScanViewModel: ObservableObject {
     }
 
     var summaryLine: String {
-        let source = viewMode == .files ? files : folders
+        let source: [AuditItem]
+        switch viewMode {
+        case .files, .fileTypes:
+            source = files
+        case .folders, .tree:
+            source = folders
+        }
         let filtered = filteredItems
         let totalBytes = filtered.reduce(Int64(0)) { $0 + $1.sizeBytes }
         let totalReadable = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
@@ -1166,7 +1176,16 @@ struct TreemapTile: View {
         let minLabelW: CGFloat = 95
         let minLabelH: CGFloat = 58
 
-        Button(action: {}) {
+        Button(action: {
+            let flags = NSEvent.modifierFlags
+            if flags.contains(.command) {
+                onTap()
+            } else if flags.contains(.control) {
+                onQueue()
+            } else if isDrillDownable {
+                onDrillDown()
+            }
+        }) {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 7)
                     .fill(item.category.color)
@@ -1205,32 +1224,11 @@ struct TreemapTile: View {
         .onHover { hovering in
             onHoverChanged(hovering ? item : nil)
         }
-        .help("Click to drill down. CMD+Click to show in Finder. CTRL+Click to queue for deletion.")
-        .onContinuousHover { phase in
-            if case .active = phase {
-                // Handle mouse clicks with modifiers
-                DispatchQueue.main.async {
-                    let flags = NSEvent.modifierFlags
-                    // Note: actual click handling happens via contextMenu and button actions
-                }
-            }
-        }
+        .help("Left Click: Drill Down (if available). CTRL+Click: Add to Delete Queue. CMD+Click: Show in Finder.")
         .contextMenu {
-            // Option 3: Drill down (if applicable)
-            if isDrillDownable {
-                Button(action: onDrillDown) {
-                    Label("Drill Down", systemImage: "arrow.down.right")
-                }
-            }
-            
-            Divider()
-            
-            // Option 1: Show in Finder
             Button(action: onTap) {
                 Label("Show in Finder", systemImage: "folder")
             }
-            
-            // Option 2: Add to deletion queue
             if isQueued {
                 Button(action: onUnqueue) {
                     Label("Remove From Delete Queue", systemImage: "xmark.circle")
@@ -1240,6 +1238,17 @@ struct TreemapTile: View {
                     Label("Add To Delete Queue", systemImage: "trash")
                 }
             }
+            Button(action: onDrillDown) {
+                Label("Drill Down", systemImage: "arrow.down.right")
+            }
+            .disabled(!isDrillDownable)
+            Divider()
+            Button("Left Click: Drill Down") {}
+                .disabled(true)
+            Button("CTRL+Click: Add To Delete Queue") {}
+                .disabled(true)
+            Button("CMD+Click: Show in Finder") {}
+                .disabled(true)
         }
     }
 }
@@ -1498,11 +1507,17 @@ struct PathTreeRowView: View {
                         onQueue(node)
                     }
                 }
-                if !node.children.isEmpty {
-                    Button("Drill Down") {
-                        onDrillDown(node)
-                    }
+                Button("Drill Down") {
+                    onDrillDown(node)
                 }
+                .disabled(node.children.isEmpty)
+                Divider()
+                Button("Left Click: Drill Down") {}
+                    .disabled(true)
+                Button("CTRL+Click: Add To Delete Queue") {}
+                    .disabled(true)
+                Button("CMD+Click: Show in Finder") {}
+                    .disabled(true)
             }
 
             if isExpanded {
@@ -1968,8 +1983,9 @@ struct KeyboardHandler: NSViewRepresentable {
             Task { @MainActor in
                 switch event.charactersIgnoringModifiers {
                 case "1": model.viewMode = .files
-                case "2": model.viewMode = .folders
-                case "3": model.viewMode = .tree
+                case "2": model.viewMode = .fileTypes
+                case "3": model.viewMode = .folders
+                case "4": model.viewMode = .tree
                 case "q": model.viewCategoryFilter = .all
                 case "w": model.viewCategoryFilter = .hugeOnly
                 case "e": model.viewCategoryFilter = .garbageOnly
@@ -2057,11 +2073,6 @@ struct ContentView: View {
                         .buttonStyle(.bordered)
                 }
 
-                Text("Threshold (MB)")
-                TextField("MB", value: $model.minSizeMB, format: .number)
-                    .frame(width: 84)
-                    .textFieldStyle(.roundedBorder)
-
                 Button(model.isScanning ? "Scanning..." : "Start Scan") {
                     model.startScan()
                 }
@@ -2128,7 +2139,7 @@ struct ContentView: View {
                                 .stroke(Color.black.opacity(0.08), lineWidth: 1)
                         )
                     }
-                } else if model.filteredItems.isEmpty {
+                } else if displayedTreemapItems.isEmpty {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color.secondary.opacity(0.08))
                         .overlay(
@@ -2136,8 +2147,23 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         )
                 } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if model.viewMode == .fileTypes, let currentExt = model.currentDrillDownExtension {
+                            HStack {
+                                Button("Back") {
+                                    model.backFromDrillDown()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                Text("File type drill-down: \(currentExt)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                        }
+
                     TreemapCanvas(
-                        items: model.currentDrillDownExtension != nil ? Array(model.filesForExtension(model.currentDrillDownExtension!).prefix(320)) : (model.groupByFileType && model.viewMode == .files ? model.groupedByExtension : Array(model.filteredItems.prefix(320))),
+                        items: displayedTreemapItems,
                         isQueued: { model.isQueued($0) },
                         onTap: { model.openInFinder($0) },
                         onQueue: { model.queue($0) },
@@ -2146,10 +2172,21 @@ struct ContentView: View {
                         onDrillDown: { model.drillDown($0) },
                         isDrillDownable: { model.isDrillDownable($0) }
                     )
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private var displayedTreemapItems: [AuditItem] {
+        if model.viewMode == .fileTypes {
+            if let ext = model.currentDrillDownExtension {
+                return Array(model.filesForExtension(ext).prefix(320))
+            }
+            return Array(model.groupedByExtension.prefix(320))
+        }
+        return Array(model.filteredItems.prefix(320))
     }
 
     private var sidebar: some View {
@@ -2161,7 +2198,7 @@ struct ContentView: View {
                 Text("View Mode")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text("(1), (2), (3)")
+                Text("(1), (2), (3), (4)")
                     .font(.caption)
                     .foregroundStyle(.gray)
             }
@@ -2171,6 +2208,15 @@ struct ContentView: View {
                 }
             }
             .pickerStyle(.segmented)
+
+            HStack {
+                Text("Threshold (MB)")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                TextField("MB", value: $model.minSizeMB, format: .number)
+                    .frame(width: 84)
+                    .textFieldStyle(.roundedBorder)
+            }
 
             HStack {
                 Text("Category Filter")
@@ -2187,14 +2233,6 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .disabled(model.viewMode == .tree)
-
-            if model.viewMode == .files {
-                Toggle(isOn: $model.groupByFileType) {
-                    Text("Group by file type")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .help("Summarize file sizes by extension")
-            }
 
             if model.viewMode != .tree {
                 HStack(spacing: 8) {
@@ -2231,7 +2269,7 @@ struct ContentView: View {
                 }
             }
 
-            if model.viewMode == .files || model.viewMode == .tree || model.viewMode == .folders {
+            if model.viewMode == .files || model.viewMode == .fileTypes || model.viewMode == .tree || model.viewMode == .folders {
                 let label = model.viewMode == .folders ? "Folder Type Filter" : "File Type Filter"
                 let preview = model.viewMode == .folders ? model.folderCategorySizePreview : model.fileCategorySizePreview
                 HStack {
