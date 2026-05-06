@@ -1,0 +1,30 @@
+# Swift build artifacts
+.build/
+*.swiftmodule/
+*.swiftdoc
+*.o
+
+# Xcode
+.DS_Store
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcbkptlist
+*.playground
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# App bundle and generated files
+*.app/
+*.icns
+icon.iconset/
+icon.svg
+
+# Derived data
+DerivedData/
