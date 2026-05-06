@@ -1717,7 +1717,7 @@ struct ContentView: View {
             }
             var items = model.groupedByExtension
             if model.watchListFilterEnabled {
-                items = items.filter { model.watchList.contains { w in w.kind == .fileExtension && w.identifier == $0.url.lastPathComponent } }
+                items = items.filter { item in model.watchList.contains { w in w.kind == .fileExtension && w.identifier == item.url.lastPathComponent } }
             }
             return Array(items.prefix(320))
         }
@@ -1727,7 +1727,7 @@ struct ContentView: View {
             }
             var items = model.groupedByFolderName
             if model.watchListFilterEnabled {
-                items = items.filter { model.watchList.contains { w in w.kind == .folderName && w.identifier == $0.url.lastPathComponent } }
+                items = items.filter { item in model.watchList.contains { w in w.kind == .folderName && w.identifier == item.url.lastPathComponent } }
             }
             return Array(items.prefix(320))
         }
