@@ -338,10 +338,12 @@ final class ScanViewModel: ObservableObject {
             }
         }
         targetSizeBytes = totalTarget
+        let minBytes = Int64(minSizeMB) * 1_048_576
 
         scanTask = Task(priority: .userInitiated) {
             let resourceKeys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey]
-            var seenPaths = Set<String>()
+            // Use hash-based dedup: 8 bytes/entry vs ~80 bytes for full path strings
+            var seenPathHashes = Set<Int>()
             var scannedCount = 0
             var scannedBytes: Int64 = 0
 
@@ -366,7 +368,8 @@ final class ScanViewModel: ObservableObject {
                         enumerator.skipDescendants()
                         continue
                     }
-                    if seenPaths.contains(path) { continue }
+                    let pathHash = path.hashValue
+                    if seenPathHashes.contains(pathHash) { continue }
 
                     do {
                         let values = try fileURL.resourceValues(forKeys: Set(resourceKeys))
@@ -374,7 +377,7 @@ final class ScanViewModel: ObservableObject {
                         guard values.isRegularFile == true else { continue }
                     } catch { continue }
 
-                    seenPaths.insert(path)
+                    seenPathHashes.insert(pathHash)
                     scannedCount += 1
 
                     guard let size = self.fileSize(for: fileURL) else { continue }
@@ -386,20 +389,24 @@ final class ScanViewModel: ObservableObject {
                     let insideGarbageRoot = garbageRoots.contains { path.hasPrefix($0.path) }
 
                     if insideHeavyRoot || (garbageReason != nil && insideGarbageRoot) {
-                        let risk = self.riskLevel(category: cat, garbageReason: garbageReason, isFolder: false)
-                        heavyOrGarbageFiles.append(
-                            AuditItem(
-                                url: fileURL,
-                                sizeBytes: size,
-                                kind: .file,
-                                category: cat,
-                                garbageReason: garbageReason,
-                                risk: risk
-                            )
-                        )
+                        // Always accumulate folder sizes (needed for folder view accuracy)
                         self.accumulateAncestors(of: fileURL, size: size, roots: allRoots, store: &folderAccumulator)
                         if garbageReason != nil {
                             self.accumulateGarbageAncestors(of: fileURL, roots: allRoots, store: &folderGarbageCount)
+                        }
+                        // Only create AuditItem for large files or garbage — skip tiny files
+                        if size >= minBytes || garbageReason != nil {
+                            let risk = self.riskLevel(category: cat, garbageReason: garbageReason, isFolder: false)
+                            heavyOrGarbageFiles.append(
+                                AuditItem(
+                                    url: fileURL,
+                                    sizeBytes: size,
+                                    kind: .file,
+                                    category: cat,
+                                    garbageReason: garbageReason,
+                                    risk: risk
+                                )
+                            )
                         }
                     }
 
