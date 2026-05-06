@@ -1724,6 +1724,38 @@ struct AboutSheetView: View {
         .frame(width: 420, height: 300)
     }
 }
+    
+final class AboutPanelController {
+    static let shared = AboutPanelController()
+    private var panel: NSPanel?
+
+    private init() {}
+
+    func show() {
+        if panel == nil {
+            let contentView = AboutSheetView { [weak self] in
+                self?.panel?.orderOut(nil)
+            }
+            let hosting = NSHostingView(rootView: contentView)
+
+            let newPanel = NSPanel(
+                contentRect: NSRect(x: 240, y: 240, width: 420, height: 300),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            newPanel.title = "About DISK AUDIT"
+            newPanel.isFloatingPanel = true
+            newPanel.hidesOnDeactivate = false
+            newPanel.contentView = hosting
+            newPanel.center()
+            self.panel = newPanel
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        panel?.makeKeyAndOrderFront(nil)
+    }
+}
 
 struct SettingsSheetView: View {
     @ObservedObject var model: ScanViewModel
@@ -2143,7 +2175,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showAbout) {
-            AboutSheetView { showAbout = false }
+            AboutPanelController.shared.show()
         }
         .sheet(isPresented: $showSettings) {
             SettingsSheetView(model: model) { showSettings = false }
@@ -2468,5 +2500,12 @@ struct DiskAuditApp: App {
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About DISK AUDIT") {
+                    AboutPanelController.shared.show()
+                }
+            }
+        }
     }
 }
