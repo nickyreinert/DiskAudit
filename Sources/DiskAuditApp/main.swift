@@ -482,6 +482,22 @@ final class ScanViewModel: ObservableObject {
         selectedCategories = [category]
     }
 
+    func toggleCategory(_ category: ScanCategory) {
+        if selectedCategories.contains(category) {
+            selectedCategories.remove(category)
+        } else {
+            selectedCategories.insert(category)
+        }
+    }
+
+    func toggleRisk(_ risk: RiskLevel) {
+        if selectedRisks.contains(risk) {
+            selectedRisks.remove(risk)
+        } else {
+            selectedRisks.insert(risk)
+        }
+    }
+
     func selectAllCategories() {
         selectedCategories = Set(ScanCategory.allCases)
     }
@@ -1540,6 +1556,15 @@ struct ContentView: View {
         }
         .padding(16)
         .frame(minWidth: 1160, minHeight: 780)
+        .onKeyPress("1") { model.viewMode = .files; return .handled }
+        .onKeyPress("2") { model.viewMode = .folders; return .handled }
+        .onKeyPress("3") { model.viewMode = .tree; return .handled }
+        .onKeyPress("q") { model.toggleCategory(ScanCategory.allCases[0]); return .handled }
+        .onKeyPress("w") { model.toggleCategory(ScanCategory.allCases[1]); return .handled }
+        .onKeyPress("e") { model.toggleCategory(ScanCategory.allCases[2]); return .handled }
+        .onKeyPress("a") { model.toggleRisk(.safe); return .handled }
+        .onKeyPress("s") { model.toggleRisk(.review); return .handled }
+        .onKeyPress("d") { model.toggleRisk(.caution); return .handled }
         .onChange(of: model.isScanning) { scanning in
             if scanning {
                 panelController.show(model: model)
@@ -1718,33 +1743,26 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
             }
 
-            if model.viewMode == .tree {
-                Text("Tree View Legend")
-                    .font(.subheadline.weight(.semibold))
-                Text("Hierarchical view of all scanned paths. Numbers show total size including subfolders.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
-            } else if model.viewMode == .files {
+            if model.viewMode == .files || model.viewMode == .tree || model.viewMode == .folders {
+                let label = model.viewMode == .folders ? "Folder Type Filter" : "File Type Filter"
+                let preview = model.viewMode == .folders ? model.folderCategorySizePreview : model.fileCategorySizePreview
                 HStack {
-                    Text("File Type Filter")
+                    Text(label)
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Button("Select All") {
-                        model.selectAllCategories()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    Button("Select All") { model.selectAllCategories() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                 }
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(ScanCategory.allCases) { category in
+                        ForEach(Array(ScanCategory.allCases.enumerated()), id: \.element) { index, category in
                             CategoryFilterChip(
                                 category: category,
                                 selected: model.selectedCategories.contains(category),
                                 sizePreview: ByteCountFormatter.string(
-                                    fromByteCount: model.fileCategorySizePreview[category, default: 0],
+                                    fromByteCount: preview[category, default: 0],
                                     countStyle: .file
                                 ),
                                 action: {
@@ -1754,51 +1772,14 @@ struct ContentView: View {
                                         model.selectedCategories.insert(category)
                                     }
                                 },
-                                commandAction: {
-                                    model.selectOnlyCategory(category)
-                                }
+                                commandAction: { model.selectOnlyCategory(category) }
                             )
                         }
                     }
                 }
                 .frame(maxHeight: 210)
-            } else if model.viewMode == .folders {
-                HStack {
-                    Text("Folder Type Filter")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Button("Select All") {
-                        model.selectAllCategories()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
+            }
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(ScanCategory.allCases) { category in
-                            CategoryFilterChip(
-                                category: category,
-                                selected: model.selectedCategories.contains(category),
-                                sizePreview: ByteCountFormatter.string(
-                                    fromByteCount: model.folderCategorySizePreview[category, default: 0],
-                                    countStyle: .file
-                                ),
-                                action: {
-                                    if model.selectedCategories.contains(category) {
-                                        model.selectedCategories.remove(category)
-                                    } else {
-                                        model.selectedCategories.insert(category)
-                                    }
-                                },
-                                commandAction: {
-                                    model.selectOnlyCategory(category)
-                                }
-                            )
-                        }
-                    }
-                }
-                .frame(maxHeight: 210)
             }
 
             Divider()
