@@ -178,6 +178,7 @@ final class ScanViewModel: ObservableObject {
     @Published var selectedRisks: Set<RiskLevel> = Set(RiskLevel.allCases)
     @Published var viewMode: TreemapViewMode = .files
     @Published var viewCategoryFilter: ViewCategoryFilter = .all
+    @Published var groupByFileType: Bool = false
 
     @Published var includeSystemGarbageScan = true
     @Published var includeFullDiskGarbageDeepScan = false
@@ -191,6 +192,7 @@ final class ScanViewModel: ObservableObject {
     @Published var lastScanTimestamp: Date?
     @Published var currentScanningPath: String = ""
     @Published var excludedPaths: [String] = []
+    @Published var currentDrillDownExtension: String? = nil
 
     private var scanTask: Task<Void, Never>?
 
@@ -206,6 +208,7 @@ final class ScanViewModel: ObservableObject {
         treeRoots = []
         lastScanTimestamp = nil
         hoveredItem = nil
+        currentDrillDownExtension = nil
         statusMessage = "Scan results cleared."
         deleteScanResultsFile()
     }
@@ -462,6 +465,42 @@ final class ScanViewModel: ObservableObject {
             let categoryPass = selectedCategories.contains(item.category)
             let scopePass = matchesViewCategoryFilter(item)
             return riskPass && categoryPass && scopePass
+        }
+    }
+
+    var groupedByExtension: [AuditItem] {
+        guard viewMode == .files && groupByFileType else { return filteredItems }
+        
+        var extensionMap: [String: (extension: String, totalSize: Int64, count: Int)] = [:]
+        
+        for item in filteredItems {
+            let ext = URL(fileURLWithPath: item.url.path).pathExtension.isEmpty ? "[no extension]" : URL(fileURLWithPath: item.url.path).pathExtension
+            if extensionMap[ext] != nil {
+                extensionMap[ext]!.totalSize += item.sizeBytes
+                extensionMap[ext]!.count += 1
+            } else {
+                extensionMap[ext] = (extension: ext, totalSize: item.sizeBytes, count: 1)
+            }
+        }
+        
+        // Create virtual AuditItem for each extension
+        return extensionMap.values.sorted { $0.totalSize > $1.totalSize }.map { data in
+            AuditItem(
+                url: URL(fileURLWithPath: "/\(data.extension)", isDirectory: false),
+                sizeBytes: data.totalSize,
+                kind: .file,
+                category: .others,
+                garbageReason: nil,
+                risk: .review
+            )
+        }
+    }
+    
+    func filesForExtension(_ ext: String) -> [AuditItem] {
+        let searchExt = ext == "[no extension]" ? "" : ext
+        return filteredItems.filter { item in
+            let itemExt = URL(fileURLWithPath: item.url.path).pathExtension
+            return (itemExt.isEmpty && searchExt.isEmpty) || itemExt == searchExt
         }
     }
 
@@ -1371,7 +1410,7 @@ struct SettingsSheetView: View {
     @ObservedObject var model: ScanViewModel
     let onClose: () -> Void
     @State private var showGarbagePaths = false
-    @State private var newExcludePath = \"\"
+    @State private var newExcludePath = ""
 
     private let systemGarbagePaths = [
         "/private/var/tmp",
@@ -1893,7 +1932,7 @@ struct ContentView: View {
                         )
                 } else {
                     TreemapCanvas(
-                        items: Array(model.filteredItems.prefix(320)),
+                        items: model.groupByFileType && model.viewMode == .files ? model.groupedByExtension : Array(model.filteredItems.prefix(320)),
                         isQueued: { model.isQueued($0) },
                         onTap: { model.openInFinder($0) },
                         onQueue: { model.queue($0) },
@@ -1941,6 +1980,14 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .disabled(model.viewMode == .tree)
+
+            if model.viewMode == .files {
+                Toggle(isOn: $model.groupByFileType) {
+                    Text("Group by file type")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .help("Summarize file sizes by extension")
+            }
 
             if model.viewMode != .tree {
                 HStack(spacing: 8) {
