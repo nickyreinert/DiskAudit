@@ -196,6 +196,12 @@ final class ScanViewModel: ObservableObject {
     @Published var currentTreeDrillPath: String? = nil
 
     private var scanTask: Task<Void, Never>?
+    private var groupedByExtensionCacheKey: String = ""
+    private var groupedByExtensionCacheItems: [AuditItem] = []
+    private var groupedByExtensionCacheCounts: [String: Int] = [:]
+    private var filesForExtensionCacheKey: String = ""
+    private var filesForExtensionCacheExt: String = ""
+    private var filesForExtensionCacheItems: [AuditItem] = []
 
     init() {
         scanLocations = Self.defaultLocations()
@@ -478,37 +484,77 @@ final class ScanViewModel: ObservableObject {
 
     var groupedByExtension: [AuditItem] {
         guard viewMode == .fileTypes else { return filteredItems }
-        
-        var extensionMap: [String: (extension: String, totalSize: Int64, count: Int)] = [:]
-        
-        for item in filteredItems {
+
+        let key = fileTypeFilterCacheKey()
+        if key == groupedByExtensionCacheKey {
+            return groupedByExtensionCacheItems
+        }
+
+        let source = filteredFilesForCurrentFilters()
+        var extensionMap: [String: (totalSize: Int64, count: Int)] = [:]
+
+        for item in source {
             let ext = URL(fileURLWithPath: item.url.path).pathExtension.isEmpty ? "[no extension]" : URL(fileURLWithPath: item.url.path).pathExtension
             if extensionMap[ext] != nil {
                 extensionMap[ext]!.totalSize += item.sizeBytes
                 extensionMap[ext]!.count += 1
             } else {
-                extensionMap[ext] = (extension: ext, totalSize: item.sizeBytes, count: 1)
+                extensionMap[ext] = (totalSize: item.sizeBytes, count: 1)
             }
         }
-        
-        // Create virtual AuditItem for each extension
-        return extensionMap.values.sorted { $0.totalSize > $1.totalSize }.map { data in
-            AuditItem(
-                url: URL(fileURLWithPath: "/\(data.extension)", isDirectory: false),
-                sizeBytes: data.totalSize,
-                kind: .file,
-                category: .others,
-                garbageReason: nil,
-                risk: .review
-            )
+
+        groupedByExtensionCacheCounts = extensionMap.reduce(into: [:]) { partialResult, entry in
+            partialResult[entry.key] = entry.value.count
         }
+
+        groupedByExtensionCacheItems = extensionMap
+            .sorted { $0.value.totalSize > $1.value.totalSize }
+            .map { ext, data in
+                AuditItem(
+                    url: URL(fileURLWithPath: "/\(ext)", isDirectory: false),
+                    sizeBytes: data.totalSize,
+                    kind: .file,
+                    category: .others,
+                    garbageReason: nil,
+                    risk: .review
+                )
+            }
+        groupedByExtensionCacheKey = key
+        return groupedByExtensionCacheItems
     }
     
     func filesForExtension(_ ext: String) -> [AuditItem] {
+        let key = fileTypeFilterCacheKey()
+        if key == filesForExtensionCacheKey && ext == filesForExtensionCacheExt {
+            return filesForExtensionCacheItems
+        }
+
         let searchExt = ext == "[no extension]" ? "" : ext
-        return filteredItems.filter { item in
+        filesForExtensionCacheItems = filteredFilesForCurrentFilters().filter { item in
             let itemExt = URL(fileURLWithPath: item.url.path).pathExtension
             return (itemExt.isEmpty && searchExt.isEmpty) || itemExt == searchExt
+        }
+        filesForExtensionCacheKey = key
+        filesForExtensionCacheExt = ext
+        return filesForExtensionCacheItems
+    }
+
+    func groupedFileCount(for item: AuditItem) -> Int {
+        groupedByExtensionCacheCounts[item.url.lastPathComponent, default: 0]
+    }
+
+    private func fileTypeFilterCacheKey() -> String {
+        let categories = selectedCategories.map(\.rawValue).sorted().joined(separator: "|")
+        let risks = selectedRisks.map(\.rawValue).sorted().joined(separator: "|")
+        return "\(files.count)#\(categories)#\(risks)#\(viewCategoryFilter.rawValue)#\(minSizeMB)"
+    }
+
+    private func filteredFilesForCurrentFilters() -> [AuditItem] {
+        guard !selectedCategories.isEmpty, !selectedRisks.isEmpty else { return [] }
+        return files.filter { item in
+            selectedRisks.contains(item.risk)
+            && selectedCategories.contains(item.category)
+            && matchesViewCategoryFilter(item)
         }
     }
     
