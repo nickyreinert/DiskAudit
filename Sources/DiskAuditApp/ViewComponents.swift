@@ -273,6 +273,8 @@ struct PathTreeRowView: View {
     let onQueue: (PathTreeNode) -> Void
     let onUnqueue: (PathTreeNode) -> Void
     let isQueued: Bool
+    let onWatch: (PathTreeNode) -> Void
+    let isWatched: Bool
 
     private var barRatio: CGFloat {
         guard levelMaxSize > 0 else { return 0 }
@@ -366,6 +368,9 @@ struct PathTreeRowView: View {
                     onDrillDown(node)
                 }
                 .disabled(node.children.isEmpty)
+                Button(isWatched ? "Unwatch" : "Watch") {
+                    onWatch(node)
+                }
                 Divider()
                 Button("Left Click: Drill Down") {}
                     .disabled(true)
@@ -385,7 +390,9 @@ struct PathTreeRowView: View {
                         onShowInFinder: onShowInFinder,
                         onQueue: onQueue,
                         onUnqueue: onUnqueue,
-                        isQueued: isQueued
+                        isQueued: isQueued,
+                        onWatch: onWatch,
+                        isWatched: isWatched
                     )
                 }
             }
